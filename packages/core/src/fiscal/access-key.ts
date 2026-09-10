@@ -23,6 +23,7 @@
  * campos.
  */
 
+import { FiscalError } from '../errors.js';
 import { mod11CheckDigit } from './mod11.js';
 
 /** Pattern do tipo `TCnpj` no PL_010f_v1.04: 12 alfanuméricos + 2 dígitos. */
@@ -38,12 +39,7 @@ export const ACCESS_KEY_LENGTH = 44;
 /** Modelos de documento cobertos por esta implementação. */
 export const NFE_MODEL = 55;
 
-export class AccessKeyValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'AccessKeyValidationError';
-  }
-}
+export class AccessKeyValidationError extends FiscalError {}
 
 export interface AccessKeyInput {
   /** Código IBGE da UF do emitente (`cUF`). */
@@ -62,7 +58,18 @@ export interface AccessKeyInput {
   readonly tpEmis: number;
   /** Código numérico de 8 posições (`cNF`). */
   readonly cNF: string;
+  /**
+   * Fuso IANA do estabelecimento emitente, usado para derivar AAMM.
+   *
+   * Existe porque `Date` é um instante absoluto: uma nota emitida às 23h30 de
+   * 31/01 em Brasília é 01/02 em UTC, e derivar a competência do UTC gerava
+   * chave com o mês seguinte. O valor correto vem do cadastro do emitente.
+   */
+  readonly timeZone?: string;
 }
+
+/** Fuso adotado quando o emitente não informa o seu. */
+export const DEFAULT_ISSUER_TIME_ZONE = 'America/Sao_Paulo';
 
 export interface ParsedAccessKey {
   readonly cUF: number;
@@ -79,6 +86,36 @@ export interface ParsedAccessKey {
 
 function padNumber(value: number, length: number): string {
   return String(value).padStart(length, '0');
+}
+
+/**
+ * Extrai ano e mês conforme o calendário do fuso informado.
+ *
+ * `Intl.DateTimeFormat` é usado em vez de aritmética de offset porque o offset
+ * de um fuso não é constante ao longo do ano.
+ */
+function localYearAndMonth(instant: Date, timeZone: string): { year: string; month: string } {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+    }).formatToParts(instant);
+  } catch {
+    throw new AccessKeyValidationError(
+      `Fuso horário inválido para o emitente: ${JSON.stringify(timeZone)}.`,
+    );
+  }
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+
+  if (year === undefined || month === undefined) {
+    throw new AccessKeyValidationError('Não foi possível derivar AAMM da data de emissão.');
+  }
+
+  return { year: year.slice(-2), month };
 }
 
 function assertIntegerInRange(
@@ -125,8 +162,10 @@ export function buildAccessKey(input: AccessKeyInput): string {
     throw new AccessKeyValidationError('Data de emissão inválida.');
   }
 
-  const year = padNumber(input.issueDate.getUTCFullYear() % 100, 2);
-  const month = padNumber(input.issueDate.getUTCMonth() + 1, 2);
+  const { year, month } = localYearAndMonth(
+    input.issueDate,
+    input.timeZone ?? DEFAULT_ISSUER_TIME_ZONE,
+  );
 
   const body =
     padNumber(input.cUF, 2) +

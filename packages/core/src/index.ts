@@ -8,6 +8,16 @@
  */
 
 export {
+  FiscalError,
+  NfeError,
+  TechnicalError,
+  isFiscalError,
+  isTechnicalError,
+  requiresReconciliation,
+  type ErrorKind,
+} from './errors.js';
+
+export {
   ALPHANUMERIC_DOMAIN,
   InvalidCharacterError,
   charNumericValue,
@@ -15,8 +25,20 @@ export {
 } from './fiscal/mod11.js';
 
 export {
+  CNPJ_BASE_LENGTH,
+  CNPJ_LENGTH,
+  InvalidCnpjError,
+  assertValidCnpj,
+  calculateCnpjCheckDigits,
+  formatCnpj,
+  isValidCnpj,
+  normalizeCnpj,
+} from './fiscal/cnpj.js';
+
+export {
   ACCESS_KEY_LENGTH,
   AccessKeyValidationError,
+  DEFAULT_ISSUER_TIME_ZONE,
   NFE_MODEL,
   buildAccessKey,
   isValidAccessKey,
@@ -31,8 +53,10 @@ export {
   InvalidTransitionError,
   NfeStatus,
   assertTransition,
+  canReachTransmissionWithoutResolution,
   canTransition,
   isEditable,
+  isResolved,
   isTerminal,
   reachableFrom,
 } from './nfe/state-machine.js';

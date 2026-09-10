@@ -11,12 +11,9 @@
  * diferente por tributo ou por UF seja configuração e não reescrita.
  */
 
-export class DecimalError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'DecimalError';
-  }
-}
+import { FiscalError } from '../errors.js';
+
+export class DecimalError extends FiscalError {}
 
 export enum RoundingMode {
   /** Empate vai para cima em módulo. Arredondamento comercial. */
@@ -31,6 +28,16 @@ const DECIMAL_INPUT = /^-?\d+(\.\d+)?$/;
 
 /** Escala interna de trabalho. Folgada o bastante para preço unitário da NF-e. */
 const INTERNAL_SCALE = 10;
+
+/** Precisão inteira dada ao menor peso positivo de um rateio. */
+const WEIGHT_PRECISION = 1_000_000;
+
+/**
+ * Teto para a razão entre o maior e o menor peso de um rateio. Acima disso a
+ * proporção deixa de ser representável e o rateio falha alto, em vez de
+ * devolver parcelas silenciosamente erradas.
+ */
+const MAX_WEIGHT_RATIO = 1e12;
 
 function pow10(exponent: number): bigint {
   return 10n ** BigInt(exponent);
@@ -89,9 +96,14 @@ export class Decimal {
     return new Decimal(units * pow10(INTERNAL_SCALE - scale), INTERNAL_SCALE);
   }
 
-  /** Inteiro escalado na escala pedida — usado na escrita no banco. */
-  toScaledUnits(scale: number): bigint {
-    return this.round(scale, RoundingMode.HalfUp).units / pow10(INTERNAL_SCALE - scale);
+  /**
+   * Inteiro escalado na escala pedida — usado na escrita no banco.
+   *
+   * A política de arredondamento é parâmetro: fixá-la aqui tornava impossível
+   * rateio em half-even, já que `allocate` passa por este método.
+   */
+  toScaledUnits(scale: number, mode: RoundingMode = RoundingMode.HalfUp): bigint {
+    return this.round(scale, mode).units / pow10(INTERNAL_SCALE - scale);
   }
 
   plus(other: Decimal): Decimal {
@@ -102,9 +114,48 @@ export class Decimal {
     return new Decimal(this.units - other.units, this.scale);
   }
 
-  times(other: Decimal): Decimal {
-    // Produto de dois valores escalados carrega escala dobrada; volta à escala interna.
-    return new Decimal((this.units * other.units) / pow10(INTERNAL_SCALE), this.scale);
+  /**
+   * Produto de dois valores escalados carrega escala dobrada e precisa voltar à
+   * escala interna. Essa redução é arredondamento, não truncamento: divisão
+   * inteira crua descartava a metade baixa em silêncio e chegava a zerar o
+   * sinal de produtos pequenos.
+   */
+  times(other: Decimal, mode: RoundingMode = RoundingMode.HalfUp): Decimal {
+    const raw = this.units * other.units;
+    const divisor = pow10(INTERNAL_SCALE);
+
+    const negative = raw < 0n;
+    const magnitude = absBigInt(raw);
+    const quotient = magnitude / divisor;
+    const remainder = magnitude % divisor;
+
+    let rounded: bigint;
+    switch (mode) {
+      case RoundingMode.Truncate: {
+        rounded = quotient;
+        break;
+      }
+      case RoundingMode.HalfUp: {
+        rounded = remainder * 2n >= divisor ? quotient + 1n : quotient;
+        break;
+      }
+      case RoundingMode.HalfEven: {
+        const doubled = remainder * 2n;
+        if (doubled > divisor) {
+          rounded = quotient + 1n;
+        } else if (doubled < divisor) {
+          rounded = quotient;
+        } else {
+          rounded = quotient % 2n === 0n ? quotient : quotient + 1n;
+        }
+        break;
+      }
+      default: {
+        throw new DecimalError(`Política de arredondamento desconhecida: ${String(mode)}.`);
+      }
+    }
+
+    return new Decimal(negative ? -rounded : rounded, INTERNAL_SCALE);
   }
 
   negated(): Decimal {
@@ -213,7 +264,12 @@ export class Decimal {
  * partes, em vez de arredondar cada parcela isoladamente — arredondar item a
  * item é o que produz a diferença de centavos que a SEFAZ rejeita.
  */
-export function allocate(total: Decimal, weights: readonly number[], scale: number): Decimal[] {
+export function allocate(
+  total: Decimal,
+  weights: readonly number[],
+  scale: number,
+  mode: RoundingMode = RoundingMode.HalfUp,
+): Decimal[] {
   if (weights.length === 0) {
     throw new DecimalError('Rateio exige ao menos um peso.');
   }
@@ -222,22 +278,53 @@ export function allocate(total: Decimal, weights: readonly number[], scale: numb
     throw new DecimalError('Pesos de rateio devem ser números não negativos.');
   }
 
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  if (totalWeight <= 0) {
+  const positiveWeights = weights.filter((weight) => weight > 0);
+  if (positiveWeights.length === 0) {
     throw new DecimalError('Soma dos pesos de rateio deve ser maior que zero.');
   }
 
-  const totalUnits = total.toScaledUnits(scale);
-  const weightUnits = weights.map((weight) => BigInt(Math.round(weight * 1_000_000)));
+  // Os pesos são normalizados pelo menor peso positivo antes de virarem
+  // inteiros. Escalar por um fator fixo achatava pesos fracionários mínimos
+  // para zero, e a soma zerada estourava divisão por zero já dentro da emissão.
+  const smallestWeight = Math.min(...positiveWeights);
+  const largestWeight = Math.max(...positiveWeights);
+  if (largestWeight / smallestWeight > MAX_WEIGHT_RATIO) {
+    throw new DecimalError(
+      `Razão entre o maior e o menor peso do rateio excede ${MAX_WEIGHT_RATIO}; ` +
+        `a proporção não é representável com precisão suficiente.`,
+    );
+  }
+
+  const weightUnits = weights.map((weight) =>
+    weight <= 0 ? 0n : BigInt(Math.round((weight / smallestWeight) * WEIGHT_PRECISION)),
+  );
   const totalWeightUnits = weightUnits.reduce((sum, weight) => sum + weight, 0n);
+  if (totalWeightUnits === 0n) {
+    throw new DecimalError('Pesos de rateio degeneraram para zero na conversão.');
+  }
+
+  // O rateio fecha com o total já reduzido à escala de saída. Um total com mais
+  // casas que `scale` não é representável na soma das partes, e forçar isso
+  // produziria parcelas que não somam o valor impresso na nota.
+  const totalUnits = total.toScaledUnits(scale, mode);
 
   const parts = weightUnits.map((weight) => (totalUnits * weight) / totalWeightUnits);
   const distributed = parts.reduce((sum, part) => sum + part, 0n);
   let remainder = totalUnits - distributed;
 
-  // Distribui o resto de uma em uma unidade da menor casa decimal.
+  // O resto vai apenas para partes que participam do rateio. Distribuí-lo a
+  // partir do índice zero dava centavo de frete ou desconto a item que fora
+  // deliberadamente excluído.
+  const eligible = parts
+    .map((_, index) => index)
+    .filter((index) => (weightUnits[index] ?? 0n) > 0n);
+
   const step = remainder >= 0n ? 1n : -1n;
-  for (let index = 0; remainder !== 0n; index = (index + 1) % parts.length) {
+  for (let cursor = 0; remainder !== 0n; cursor = (cursor + 1) % eligible.length) {
+    const index = eligible[cursor];
+    if (index === undefined) {
+      throw new DecimalError('Falha ao distribuir o resto do rateio.');
+    }
     parts[index] = (parts[index] ?? 0n) + step;
     remainder -= step;
   }

@@ -35,13 +35,36 @@ NT 2026.007 v.1.00. Arquivos baixados do portal oficial, **sem modificação**.
 
 | Módulo | Estado | Testes |
 |---|---|---|
-| `@nfe/core` · módulo 11 + CNPJ alfanumérico | pronto | 7 |
+| `@nfe/core` · módulo 11 alfanumérico | pronto | 7 |
+| `@nfe/core` · CNPJ alfanumérico + DV | pronto | 14 |
 | `@nfe/core` · chave de acesso + DV | pronto | 12 |
 | `@nfe/core` · decimal exato e rateio | pronto | 15 |
 | `@nfe/core` · máquina de estados | pronto | 17 |
+| `@nfe/core` · regressões de revisão | pronto | 16 |
 | `@nfe/xsd` · validação contra XSD oficial | pronto | 9 |
 
-Total: **60 testes passando**, typecheck strict limpo nos dois pacotes.
+Total: **90 testes passando**, typecheck strict limpo nos dois pacotes.
+
+### Revisão de código de 2026-09-10
+
+Uma revisão em dois eixos (padrões e especificação) encontrou seis defeitos reais
+na primeira versão desta fundação. Todos foram reproduzidos por teste antes de
+serem corrigidos; os testes ficaram como regressão em
+`packages/core/tests/review-regressions.test.ts`.
+
+| # | Defeito | Impacto |
+|---|---|---|
+| 1 | `allocate` estourava `RangeError` com pesos fracionários mínimos | falha crua no meio da emissão |
+| 2 | resto do rateio ia para item de peso zero | item excluído recebia centavo de frete/desconto |
+| 3 | AAMM da chave derivava de UTC | nota emitida após 21h no último dia do mês recebia competência errada |
+| 4 | `PENDING_RECONCILIATION` alcançava `SENDING` via `CONTINGENCY` | caminho de retransmissão — NF-e duplicada |
+| 5 | `times()` truncava em silêncio | perda de precisão e de sinal em produtos pequenos |
+| 6 | `toScaledUnits` fixava `HalfUp` | rateio nunca conseguia usar half-even |
+
+O defeito 4 é o mais grave: a invariante estava afirmada no comentário e no
+teste, mas o teste verificava apenas a ausência da aresta direta. A garantia
+agora é uma busca no grafo (`canReachTransmissionWithoutResolution`), não a
+inspeção de uma aresta.
 
 ## O que NÃO está implementado
 

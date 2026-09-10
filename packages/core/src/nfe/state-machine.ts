@@ -15,6 +15,8 @@
  *    aresta de retransmissão aqui é o caminho direto para NF-e duplicada.
  */
 
+import { FiscalError } from '../errors.js';
+
 export enum NfeStatus {
   Draft = 'DRAFT',
   Validating = 'VALIDATING',
@@ -34,13 +36,12 @@ export enum NfeStatus {
   Cancelled = 'CANCELLED',
 }
 
-export class InvalidTransitionError extends Error {
+export class InvalidTransitionError extends FiscalError {
   constructor(
     readonly from: NfeStatus,
     readonly to: NfeStatus,
   ) {
     super(`Transição inválida de ${from} para ${to}.`);
-    this.name = 'InvalidTransitionError';
   }
 }
 
@@ -74,12 +75,16 @@ const TRANSITIONS: Readonly<Record<NfeStatus, readonly NfeStatus[]>> = Object.fr
   // Falha técnica. Não se sabe se a SEFAZ processou — vai para reconciliação.
   [NfeStatus.CommunicationError]: [NfeStatus.PendingReconciliation],
 
-  // Saídas apenas por descoberta via consulta. Sem aresta de retransmissão.
+  // Saídas apenas por descoberta via consulta.
+  //
+  // `Contingency` foi removida daqui na revisão de 2026-09-10: ela reintroduzia
+  // um caminho até `Sending` em dois saltos, justamente o que a invariante
+  // existe para impedir. Contingência é decisão tomada antes do envio, com o
+  // desfecho ainda desconhecido não se transmite nada.
   [NfeStatus.PendingReconciliation]: [
     NfeStatus.Authorized,
     NfeStatus.Rejected,
     NfeStatus.Denied,
-    NfeStatus.Contingency,
   ],
 
   [NfeStatus.Contingency]: [
@@ -134,4 +139,59 @@ export function isTerminal(status: NfeStatus): boolean {
 
 export function isEditable(status: NfeStatus): boolean {
   return EDITABLE.has(status);
+}
+
+/** Estados em que o desfecho do documento junto à SEFAZ já é conhecido. */
+const RESOLVED = new Set<NfeStatus>([
+  NfeStatus.Authorized,
+  NfeStatus.Rejected,
+  NfeStatus.Denied,
+  NfeStatus.Cancelled,
+]);
+
+/** Estados que representam o documento em transmissão. */
+const TRANSMITTING = new Set<NfeStatus>([NfeStatus.Queued, NfeStatus.Sending]);
+
+export function isResolved(status: NfeStatus): boolean {
+  return RESOLVED.has(status);
+}
+
+/**
+ * Responde se, a partir de `origin`, é possível chegar a transmissão **sem**
+ * antes passar por um estado de desfecho conhecido.
+ *
+ * Verificar apenas a ausência da aresta direta era insuficiente: a revisão
+ * mostrou que `PENDING_RECONCILIATION` alcançava `SENDING` em dois saltos, via
+ * `CONTINGENCY`. Esta busca percorre o grafo inteiro e é o que realmente
+ * sustenta a garantia de não duplicação.
+ *
+ * Passar por resolução é legítimo — uma nota rejeitada pode ser corrigida e
+ * reemitida. O que não pode é transmitir de novo um documento cujo destino
+ * ainda se desconhece.
+ */
+export function canReachTransmissionWithoutResolution(origin: NfeStatus): boolean {
+  const visited = new Set<NfeStatus>([origin]);
+  const queue: NfeStatus[] = [origin];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) {
+      break;
+    }
+
+    for (const next of reachableFrom(current)) {
+      if (TRANSMITTING.has(next)) {
+        return true;
+      }
+      // A busca para ao atingir um desfecho: o que vem depois dele é um
+      // documento novo, não a retransmissão deste.
+      if (RESOLVED.has(next) || visited.has(next)) {
+        continue;
+      }
+      visited.add(next);
+      queue.push(next);
+    }
+  }
+
+  return false;
 }

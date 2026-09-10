@@ -36,24 +36,43 @@ export interface ValidationResult {
  * O runtime WASM do libxml não enxerga o filesystem do host, então os
  * `xs:include` encadeados do leiaute precisam ser servidos por um provider.
  *
- * O provider resolve exclusivamente pelo nome-base dentro dos diretórios de
- * schema registrados. Isso é deliberado: impede que um `schemaLocation`
- * manipulado alcance arquivo arbitrário da máquina.
+ * O provider registra o diretório sob o **id do pacote**, e os schemas são
+ * carregados com URL `<packageId>/<arquivo>`. O libxml resolve os includes
+ * relativos a essa URL, então cada include chega já carimbado com o pacote a
+ * que pertence.
+ *
+ * Isso corrigiu um defeito encontrado na revisão: resolver apenas pelo
+ * nome-base fazia dois pacotes que contêm `leiauteNFe_v4.00.xsd` colidirem —
+ * vencia o que tivesse sido registrado primeiro. Como pacotes diferentes trazem
+ * versões diferentes do mesmo arquivo, um documento histórico podia ser
+ * validado contra o schema errado, exatamente o oposto do que o registro de
+ * pacotes promete.
+ *
+ * A resolução continua confinada ao diretório do pacote: `basename` descarta
+ * qualquer travessia embutida no `schemaLocation`.
  */
-const registeredDirectories = new Set<string>();
+const schemaDirectoriesByPackage = new Map<string, string>();
 const openHandles = new Map<number, { buffer: Buffer; position: number }>();
 let nextHandleId = 1;
 let providerRegistered = false;
 
-function resolveWithinRegisteredDirectories(requested: string): string | undefined {
-  const name = basename(requested);
-  for (const directory of registeredDirectories) {
-    const candidate = resolve(directory, name);
-    if (candidate.startsWith(resolve(directory)) && existsSync(candidate)) {
-      return candidate;
-    }
+function resolveSchemaFile(requested: string): string | undefined {
+  const normalized = requested.replace(/\\/g, '/');
+  const segments = normalized.split('/').filter((segment) => segment.length > 0);
+
+  const fileName = segments.at(-1);
+  const packageId = segments.at(-2);
+  if (fileName === undefined || packageId === undefined) {
+    return undefined;
   }
-  return undefined;
+
+  const directory = schemaDirectoriesByPackage.get(packageId);
+  if (directory === undefined) {
+    return undefined;
+  }
+
+  const candidate = resolve(directory, basename(fileName));
+  return existsSync(candidate) ? candidate : undefined;
 }
 
 function ensureProviderRegistered(): void {
@@ -62,9 +81,9 @@ function ensureProviderRegistered(): void {
   }
 
   xmlRegisterInputProvider({
-    match: (filename: string) => resolveWithinRegisteredDirectories(filename) !== undefined,
+    match: (filename: string) => resolveSchemaFile(filename) !== undefined,
     open: (filename: string) => {
-      const path = resolveWithinRegisteredDirectories(filename);
+      const path = resolveSchemaFile(filename);
       if (path === undefined) {
         return undefined;
       }
@@ -126,12 +145,13 @@ export class NfeSchemaValidator {
       );
     }
 
-    registeredDirectories.add(directory);
+    schemaDirectoriesByPackage.set(schemaPackage.id, directory);
     ensureProviderRegistered();
 
     const rootPath = resolve(directory, schemaPackage.rootSchema);
+    // A URL carimba o pacote, para que os includes relativos resolvam dentro dele.
     const schemaDoc = XmlDocument.fromBuffer(readFileSync(rootPath), {
-      url: schemaPackage.rootSchema,
+      url: `${schemaPackage.id}/${schemaPackage.rootSchema}`,
     });
     const validator = XsdValidator.fromDoc(schemaDoc);
 
@@ -184,9 +204,10 @@ export class NfeSchemaValidator {
   }
 
   dispose(): void {
-    for (const { validator, schemaDoc } of this.cache.values()) {
+    for (const [packageId, { validator, schemaDoc }] of this.cache.entries()) {
       validator.dispose();
       schemaDoc.dispose();
+      schemaDirectoriesByPackage.delete(packageId);
     }
     this.cache.clear();
   }

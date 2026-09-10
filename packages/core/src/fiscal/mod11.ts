@@ -11,6 +11,8 @@
  * deste — chaves e CNPJs puramente numéricos continuam produzindo o mesmo DV.
  */
 
+import { FiscalError } from '../errors.js';
+
 const ASCII_ZERO = 48;
 const ASCII_NINE = 57;
 const ASCII_UPPER_A = 65;
@@ -19,13 +21,12 @@ const ASCII_UPPER_Z = 90;
 /** Domínio aceito para caracteres ponderáveis, conforme os patterns do XSD. */
 export const ALPHANUMERIC_DOMAIN = /^[0-9A-Z]$/;
 
-export class InvalidCharacterError extends Error {
+export class InvalidCharacterError extends FiscalError {
   constructor(readonly character: string) {
     super(
       `Caractere ${JSON.stringify(character)} fora do domínio [0-9A-Z] exigido ` +
         `pela NT 2026.004. CNPJ alfanumérico deve ser informado em caixa alta.`,
     );
-    this.name = 'InvalidCharacterError';
   }
 }
 
