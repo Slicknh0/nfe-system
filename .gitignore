@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Segredos e material criptográfico — nunca versionar
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+certs/
+
+# Artefatos fiscais gerados localmente
+tmp/
+storage/
