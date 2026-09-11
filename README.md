@@ -104,14 +104,23 @@ Nenhum destes foi chutado no código — todos são entrada parametrizável:
 ```bash
 npm install
 
-# testes
-(cd packages/core && ../../node_modules/.bin/vitest run)
-(cd packages/xsd  && ../../node_modules/.bin/vitest run)
-
-# typecheck strict
-(cd packages/core && ../../node_modules/.bin/tsc --noEmit)
-(cd packages/xsd  && ../../node_modules/.bin/tsc --noEmit)
+npm run verify     # lint + typecheck + testes + build + smoke, nessa ordem
 ```
+
+Ou cada etapa isolada:
+
+```bash
+npm run lint       # eslint com regras baseadas em tipos
+npm run typecheck  # tsc --noEmit, strict
+npm test           # 90 testes nos dois pacotes
+npm run build      # emite dist/ apenas de src
+npm run smoke      # exercita o dist compilado, não o source
+```
+
+`npm run smoke` existe porque build verde não prova que o artefato emitido é
+utilizável — o script importa `dist/` como um consumidor real importaria, gera
+uma chave de acesso com CNPJ alfanumérico, confere o rateio e valida um XML
+contra o XSD oficial.
 
 Requisitos: Node >= 22. Sem dependência de toolchain nativo — a validação XSD usa
 `libxml2-wasm`, que roda no Windows sem build.

@@ -103,10 +103,25 @@ espalhada (seção 4 do brief).
 
 ## 4. Precisão monetária
 
-Nada de `number` para dinheiro. Tipo `Money` sobre inteiro escalado
-(`bigint`, escala fixa), com arredondamento half-even explícito e centralizado.
+Nada de `number` para dinheiro. Tipo `Decimal` sobre inteiro escalado
+(`bigint`, escala fixa de 10 casas), com política de arredondamento **explícita e
+parametrizada em toda operação que reduz escala** — `round`, `toFixed`, `times`,
+`toScaledUnits` e `allocate`.
+
+O default é `HalfUp` (arredondamento comercial). **Isso é decisão arquitetural,
+não regra fiscal confirmada** — por isso é parâmetro, e não constante. Uma
+exigência diferente por tributo ou por UF é configuração, não reescrita.
+
+> Revisão de 2026-09-10: uma versão anterior deste documento afirmava
+> "arredondamento half-even". O código sempre usou `HalfUp` como default. A
+> divergência foi resolvida a favor do código, e a política virou parâmetro
+> alcançável a partir do rateio — antes `toScaledUnits` fixava `HalfUp`
+> internamente, o que tornava half-even inalcançável justamente na operação em
+> que mais importa.
+
 Rateio de desconto/frete usa distribuição com resto, garantindo que a soma dos
-itens fecha exatamente com o total da nota — a fonte clássica de rejeição.
+itens fecha exatamente com o total da nota — a fonte clássica de rejeição. O
+resto é distribuído apenas entre parcelas de peso não nulo.
 
 ## 5. Máquina de estados
 
