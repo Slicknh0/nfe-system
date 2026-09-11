@@ -24,6 +24,7 @@
  */
 
 import { FiscalError } from '../errors.js';
+import { toZonedDateTime } from '../time/zoned-time.js';
 import { mod11CheckDigit } from './mod11.js';
 
 /** Pattern do tipo `TCnpj` no PL_010f_v1.04: 12 alfanuméricos + 2 dígitos. */
@@ -89,33 +90,14 @@ function padNumber(value: number, length: number): string {
 }
 
 /**
- * Extrai ano e mês conforme o calendário do fuso informado.
+ * Ano com dois dígitos e mês, no calendário do fuso do emitente.
  *
- * `Intl.DateTimeFormat` é usado em vez de aritmética de offset porque o offset
- * de um fuso não é constante ao longo do ano.
+ * A conversão vive em `time/zoned-time`, compartilhada com `dhEmi`, para que a
+ * competência da chave e a data impressa no XML nunca discordem.
  */
 function localYearAndMonth(instant: Date, timeZone: string): { year: string; month: string } {
-  let parts: Intl.DateTimeFormatPart[];
-  try {
-    parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-    }).formatToParts(instant);
-  } catch {
-    throw new AccessKeyValidationError(
-      `Fuso horário inválido para o emitente: ${JSON.stringify(timeZone)}.`,
-    );
-  }
-
-  const year = parts.find((part) => part.type === 'year')?.value;
-  const month = parts.find((part) => part.type === 'month')?.value;
-
-  if (year === undefined || month === undefined) {
-    throw new AccessKeyValidationError('Não foi possível derivar AAMM da data de emissão.');
-  }
-
-  return { year: year.slice(-2), month };
+  const zoned = toZonedDateTime(instant, timeZone);
+  return { year: zoned.year.slice(-2), month: zoned.month };
 }
 
 function assertIntegerInRange(

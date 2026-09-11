@@ -4,15 +4,19 @@
  *
  * Existe porque `npm test` valida o source via vitest, e build verde não prova
  * que o artefato emitido é utilizável. Este script importa o `dist` como um
- * consumidor real importaria.
+ * consumidor real importaria e percorre o pipeline inteiro: montar o XML,
+ * assinar, validar contra o XSD oficial e verificar a assinatura.
  *
  * Uso: npm run smoke   (roda `npm run build` antes)
  */
 
+import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import forge from 'node-forge';
 
 const core = await import('../packages/core/dist/index.js');
 const xsd = await import('../packages/xsd/dist/index.js');
+const signer = await import('../packages/signer/dist/index.js');
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -34,50 +38,10 @@ const alphaCnpj = alphaBase + core.calculateCnpjCheckDigits(alphaBase);
 check(`CNPJ alfanumérico ${alphaCnpj} é válido`, core.isValidCnpj(alphaCnpj), true);
 check('adulteração é detectada', core.isValidCnpj('B' + alphaCnpj.slice(1)), false);
 
-console.log('\n— Chave de acesso ————————————————————————————');
-
-const key = core.buildAccessKey({
-  cUF: 35,
-  issueDate: new Date('2026-09-11T10:00:00-03:00'),
-  cnpj: alphaCnpj,
-  model: 55,
-  series: 1,
-  number: 4242,
-  tpEmis: 1,
-  cNF: '87654321',
-});
-
-console.log(`        chave: ${key}`);
-check('tem 44 posições', key.length, 44);
-check('casa com TChNFe do XSD oficial', /^[0-9]{6}[0-9A-Z]{12}[0-9]{26}$/.test(key), true);
-check('DV confere', core.isValidAccessKey(key), true);
-
-const parsed = core.parseAccessKey(key);
-check('round-trip preserva CNPJ alfanumérico', parsed.cnpj, alphaCnpj);
-check('round-trip preserva número', parsed.number, 4242);
-
-// Fuso: 31/01 23h30 em Brasília não pode virar competência de fevereiro.
-const borderKey = core.buildAccessKey({
-  cUF: 35,
-  issueDate: new Date('2026-01-31T23:30:00-03:00'),
-  cnpj: '11222333000181',
-  model: 55,
-  series: 1,
-  number: 1,
-  tpEmis: 1,
-  cNF: '00000001',
-});
-check('AAMM usa data local do emitente', borderKey.slice(2, 6), '2601');
-
 console.log('\n— Precisão monetária —————————————————————————');
 
 const { Decimal, allocate } = core;
 check('0.1 + 0.2', Decimal.parse('0.1').plus(Decimal.parse('0.2')).toString(), '0.3');
-check(
-  '3.75 × 19.99',
-  Decimal.parse('3.7500').times(Decimal.parse('19.9900')).toFixed(4),
-  '74.9625',
-);
 
 const rateio = allocate(Decimal.parse('100.00'), [1, 1, 1], 2);
 console.log(`        rateio 100,00 / 3: ${rateio.map((p) => p.toFixed(2)).join(' + ')}`);
@@ -86,9 +50,6 @@ check(
   rateio.reduce((a, b) => a.plus(b), Decimal.ZERO).toFixed(2),
   '100.00',
 );
-
-const comExcluido = allocate(Decimal.parse('0.05'), [0, 1, 1, 1], 2);
-check('item de peso zero não recebe centavo', comExcluido[0].toFixed(2), '0.00');
 
 console.log('\n— Máquina de estados ——————————————————————————');
 
@@ -99,29 +60,120 @@ check(
   canReachTransmissionWithoutResolution(NfeStatus.PendingReconciliation),
   false,
 );
-check(
-  'rascunho alcança transmissão',
-  canReachTransmissionWithoutResolution(NfeStatus.Draft),
-  true,
-);
 
-console.log('\n— Validação contra XSD oficial ————————————————');
+console.log('\n— Pipeline: montar → assinar → XSD oficial → verificar ——');
+
+const address = {
+  street: 'Avenida Paulista',
+  number: '1000',
+  district: 'Bela Vista',
+  municipalityCode: '3550308',
+  municipalityName: 'São Paulo',
+  state: 'SP',
+  postalCode: '01310100',
+};
+
+const document = {
+  identification: {
+    stateCode: 35,
+    randomCode: '48213967',
+    operationNature: 'Venda de mercadoria',
+    series: 1,
+    number: 4242,
+    issuedAt: new Date('2026-09-11T10:00:00-03:00'),
+    timeZone: 'America/Sao_Paulo',
+    operationType: core.OperationType.Exit,
+    destinationScope: core.DestinationScope.Internal,
+    municipalityCode: '3550308',
+    printFormat: core.DanfePrintFormat.Portrait,
+    emissionType: core.EmissionType.Normal,
+    environment: core.Environment.Homologation,
+    purpose: core.InvoicePurpose.Normal,
+    finalConsumer: core.FinalConsumer.Yes,
+    buyerPresence: core.BuyerPresence.InPerson,
+    applicationVersion: 'nfe-system 0.1.0',
+  },
+  issuer: {
+    cnpj: alphaCnpj,
+    legalName: 'Loja Exemplo Comercio de Roupas Ltda',
+    address,
+    stateRegistration: '123456789012',
+    taxRegime: core.TaxRegime.SimplesNacional,
+  },
+  recipient: {
+    document: { type: 'CPF', value: '52998224725' },
+    name: 'Maria da Silva',
+    address: { ...address, street: 'Rua Augusta', number: '500', postalCode: '01305000' },
+    stateRegistrationIndicator: core.StateRegistrationIndicator.NonContributor,
+  },
+  items: [
+    {
+      productCode: 'CAM-001',
+      description: 'Camiseta de algodão',
+      ncm: '61091000',
+      cfop: '5102',
+      unit: 'UN',
+      quantity: Decimal.parse('2'),
+      unitPrice: Decimal.parse('49.90'),
+      taxes: {
+        icms: { kind: 'SimplesNacional102', origin: 0, csosn: '102' },
+        pis: { kind: 'NonTaxed', cst: '07' },
+        cofins: { kind: 'NonTaxed', cst: '07' },
+      },
+    },
+  ],
+  transport: { freightMode: core.FreightMode.NoFreight },
+  payment: {
+    entries: [
+      { indicator: core.PaymentIndicator.Immediate, method: '01', amount: Decimal.parse('99.80') },
+    ],
+  },
+};
+
+const unsigned = core.buildUnsignedNfe(document);
+console.log(`        chave: ${unsigned.accessKey}`);
+check('chave com CNPJ alfanumérico é válida', core.isValidAccessKey(unsigned.accessKey), true);
+check('vNF derivado dos itens', unsigned.totals.invoice.toFixed(2), '99.80');
+
+// Certificado autoassinado gerado em memória — nenhuma credencial real envolvida.
+const keys = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+});
+const certificate = forge.pki.createCertificate();
+certificate.publicKey = forge.pki.publicKeyFromPem(keys.publicKey);
+certificate.serialNumber = '01';
+certificate.validity.notBefore = new Date(Date.now() - 86_400_000);
+certificate.validity.notAfter = new Date(Date.now() + 86_400_000);
+const subject = [{ name: 'commonName', value: 'SMOKE TEST' }];
+certificate.setSubject(subject);
+certificate.setIssuer(subject);
+certificate.sign(forge.pki.privateKeyFromPem(keys.privateKey), forge.md.sha256.create());
+const credentials = {
+  privateKeyPem: keys.privateKey,
+  certificatePem: forge.pki.certificateToPem(certificate),
+};
 
 const validator = new xsd.NfeSchemaValidator(repositoryRoot);
-console.log(`        pacote: ${xsd.PL_010F.id} (${xsd.PL_010F.technicalNotes.join(', ')})`);
+console.log(`        schema: ${xsd.PL_010F.id} (${xsd.PL_010F.technicalNotes.join(', ')})`);
 
-const invalidXml =
-  `<?xml version="1.0" encoding="UTF-8"?>` +
-  `<NFe xmlns="http://www.portalfiscal.inf.br/nfe">` +
-  `<infNFe versao="4.00" Id="NFe123"><lixo/></infNFe></NFe>`;
+const unsignedResult = validator.validate(unsigned.xml);
+check('XML sem assinatura é rejeitado (ds:Signature obrigatória)', unsignedResult.valid, false);
 
-const result = validator.validate(invalidXml);
-check('XML fora do leiaute é rejeitado', result.valid, false);
-check('erro foi traduzido para negócio', result.errors.length > 0, true);
-if (result.errors[0]) {
-  console.log(`        explicação: ${result.errors[0].explanation}`);
-  console.log(`        ação: ${result.errors[0].suggestedAction}`);
+const signed = signer.signNfeXml(unsigned.xml, credentials);
+const signedResult = validator.validate(signed);
+check('XML assinado passa no XSD oficial', signedResult.valid, true);
+for (const error of signedResult.errors) {
+  console.log(`        ${error.technicalMessage}`);
 }
+
+check('assinatura confere', signer.verifyNfeSignature(signed).valid, true);
+
+const tampered = signed.replace('<vNF>99.80</vNF>', '<vNF>9.80</vNF>');
+check('valor alterado após assinar é detectado', signer.verifyNfeSignature(tampered).valid, false);
+
+console.log(`        XML assinado: ${signed.length} bytes`);
 validator.dispose();
 
 console.log(

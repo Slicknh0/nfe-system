@@ -50,6 +50,55 @@ export {
 export { Decimal, DecimalError, RoundingMode, allocate } from './money/decimal.js';
 
 export {
+  CPF_BASE_LENGTH,
+  CPF_LENGTH,
+  InvalidCpfError,
+  assertValidCpf,
+  calculateCpfCheckDigits,
+  isValidCpf,
+  normalizeCpf,
+} from './fiscal/cpf.js';
+
+export { WITHOUT_GTIN, isValidGtin } from './fiscal/gtin.js';
+
+export {
+  InvalidInstantError,
+  InvalidTimeZoneError,
+  toZonedDateTime,
+  type ZonedDateTime,
+} from './time/zoned-time.js';
+
+export {
+  XmlStructureError,
+  element,
+  leaf,
+  optionalLeaf,
+  serializeXml,
+  text,
+  type XmlAttribute,
+  type XmlChild,
+  type XmlElement,
+  type XmlNode,
+  type XmlText,
+} from './xml/element.js';
+
+export * from './nfe/document.js';
+
+export { computeTotals, itemGrossValue, type InvoiceTotals } from './nfe/totals.js';
+
+export { XmlValueFormatError } from './nfe/xml/format.js';
+
+export { InvalidFiscalTextError } from './nfe/xml/text.js';
+
+export {
+  MAX_ITEMS,
+  NFE_LAYOUT_VERSION,
+  NFE_NAMESPACE,
+  buildUnsignedNfe,
+  type UnsignedNfe,
+} from './nfe/xml/build-nfe-xml.js';
+
+export {
   InvalidTransitionError,
   NfeStatus,
   assertTransition,
