@@ -1,5 +1,5 @@
 {
-  "name": "@nfe/core",
+  "name": "@nfe/sefaz",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,9 +14,11 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@nfe/core": "*"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",

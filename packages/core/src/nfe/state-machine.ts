@@ -62,6 +62,12 @@ const TRANSITIONS: Readonly<Record<NfeStatus, readonly NfeStatus[]>> = Object.fr
     NfeStatus.Rejected,
     NfeStatus.Denied,
     NfeStatus.CommunicationError,
+    // Falha técnica com desfecho CONHECIDO: a requisição comprovadamente não
+    // saiu (conexão recusada, DNS, handshake TLS) ou a SEFAZ respondeu que o
+    // serviço está paralisado (cStat 108/109). Nada foi processado, então o
+    // documento volta à fila com o mesmo XML assinado. Qualquer dúvida sobre o
+    // envio vai para `CommunicationError`, nunca para cá.
+    NfeStatus.Queued,
   ],
 
   // Recibo aceito e em processamento: resolve por consulta de recibo.

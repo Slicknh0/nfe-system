@@ -10,13 +10,22 @@
  * Uso: npm run smoke   (roda `npm run build` antes)
  */
 
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import EmbeddedPostgres from 'embedded-postgres';
 import forge from 'node-forge';
+import pg from 'pg';
 
 const core = await import('../packages/core/dist/index.js');
 const xsd = await import('../packages/xsd/dist/index.js');
 const signer = await import('../packages/signer/dist/index.js');
+const sefaz = await import('../packages/sefaz/dist/index.js');
+const emission = await import('../packages/emission/dist/index.js');
+const persistence = await import('../packages/persistence/dist/index.js');
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -174,6 +183,113 @@ const tampered = signed.replace('<vNF>99.80</vNF>', '<vNF>9.80</vNF>');
 check('valor alterado após assinar é detectado', signer.verifyNfeSignature(tampered).valid, false);
 
 console.log(`        XML assinado: ${signed.length} bytes`);
+
+console.log('\n— Emissão: Postgres real, RLS e SEFAZ simulada ————————');
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+// Postgres descartável: diretório temporário, porta livre, senhas geradas agora.
+const databaseDir = mkdtempSync(join(tmpdir(), 'nfe-smoke-'));
+const port = await freePort();
+const adminPassword = randomBytes(24).toString('base64url');
+const appPassword = randomBytes(24).toString('base64url');
+const server = new EmbeddedPostgres({
+  databaseDir,
+  port,
+  user: 'postgres',
+  password: adminPassword,
+  persistent: false,
+  onLog: () => undefined,
+});
+
+try {
+  await server.initialise();
+  await server.start();
+  const connection = { host: '127.0.0.1', port, database: 'postgres' };
+  const admin = new pg.Pool({ ...connection, user: 'postgres', password: adminPassword, max: 2 });
+  await admin.query(
+    `CREATE ROLE nfe_app LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD ${pg.escapeLiteral(appPassword)}`,
+  );
+
+  const applied = await persistence.migrate(admin);
+  check('migrations aplicadas', applied.length, persistence.loadMigrations().length);
+  await persistence.grantApplicationAccess(admin, 'nfe_app');
+
+  const app = new pg.Pool({ ...connection, user: 'nfe_app', password: appPassword, max: 8 });
+  await persistence.assertRestrictedRole(app);
+  check('aplicação conecta com papel sem superusuário e sem BYPASSRLS', true, true);
+
+  const db = persistence.createDatabase(app);
+  const tenantId = await persistence.createTenant(db, 'Smoke');
+  const issuerId = await persistence.createIssuer(db, tenantId, {
+    cnpj: alphaCnpj,
+    legalName: 'Loja Exemplo Comercio de Roupas Ltda',
+  });
+
+  const mock = new sefaz.MockSefazProvider().scriptAuthorizations({
+    type: 'lose-response-after-processing',
+  });
+  const service = new emission.EmissionService({
+    store: new persistence.PostgresEmissionStore(db),
+    sefaz: mock,
+    signer: {
+      sign: ({ unsignedXml, now }) =>
+        Promise.resolve(signer.signNfeXml(unsignedXml, credentials, { now })),
+    },
+    schemaValidator: validator,
+  });
+
+  const { number: _number, randomCode: _randomCode, issuedAt: _issuedAt, ...draftIdentification } =
+    document.identification;
+  const draft = { ...document, identification: draftIdentification };
+  const { invoice } = await service.createDraft({
+    tenantId,
+    issuerId,
+    idempotencyKey: 'smoke-1',
+    draft,
+  });
+  const reference = { tenantId, invoiceId: invoice.id };
+
+  const issued = await service.issue(reference);
+  check('rascunho emitido com o número 1 da série', `${issued.kind} ${issued.invoice.number}`, 'QUEUED 1');
+
+  const sent = await service.transmit(reference);
+  check('resposta perdida vira reconciliação pendente', sent.invoice.status, 'PENDING_RECONCILIATION');
+
+  const reconciled = await service.reconcile(reference);
+  check('consulta à SEFAZ resolve como autorizada', reconciled.invoice.status, 'AUTHORIZED');
+  check('a SEFAZ recebeu um único envio', mock.countCalls('AUTHORIZATION'), 1);
+
+  let sqlState = 'nenhum';
+  const client = await app.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+    await client.query("UPDATE invoices SET status = 'DRAFT' WHERE id = $1", [invoice.id]);
+  } catch (error) {
+    sqlState = error.code;
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+  check('o banco recusa reabrir NF-e autorizada, mesmo com SQL direto', sqlState, 'NFE02');
+
+  await app.end();
+  await admin.end();
+} finally {
+  await server.stop();
+  rmSync(databaseDir, { recursive: true, force: true });
+}
+
 validator.dispose();
 
 console.log(

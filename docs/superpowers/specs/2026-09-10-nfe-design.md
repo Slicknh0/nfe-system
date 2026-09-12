@@ -85,7 +85,7 @@ default vindo de configuração e não de constante embutida.
 ```
 apps/web (Next.js)  ──HTTP──>  apps/api (NestJS)  ──> packages/core (domínio puro)
                                       │                        │
-                                      ├──> Postgres (Prisma)    ├── money/
+                                      ├──> Postgres (Drizzle)   ├── money/
                                       ├──> Redis + BullMQ       ├── access-key/
                                       │        │                ├── cnpj/
                                       │        v                ├── state-machine/
@@ -161,3 +161,35 @@ telas do fluxo principal.
 
 Não entra (fatias seguintes): provider SEFAZ real ligado, CC-e, inutilização,
 contingência, DANFE definitivo, motor IBS/CBS completo.
+
+## 9. Fatia 2 — persistência, numeração e ciclo de autorização (2026-09-12)
+
+### 9.1 Base oficial consultada
+
+| Fato | Fonte |
+|---|---|
+| `cStat` 100/150 autorizam; 110 e 301–303 denegam (tabela fechada) | MOC 7.0, Anexo I, 4.4.1 e 4.4.3 |
+| Rejeições: 142 e faixa 2xx–9xx | MOC 7.0, Anexo I, 4.4.2 |
+| 204 duplicidade; 539 duplicidade com diferença na chave | MOC 7.0, Anexo I, regras de validação |
+| 217 "NF-e não consta na base de dados da SEFAZ" na consulta | MOC 7.0, Visão Geral, 5.4.4, regra J03 |
+| 103/105 lote em processamento; 108/109 serviço paralisado | MOC 7.0, Anexo I, 4.4.1; Visão Geral, 5.2.5 |
+| Síncrono (`indSinc=1`) só com uma NF-e no lote | MOC 7.0, Visão Geral, 5.1.1 |
+| "NF-e Pendentes de Retorno" podem não ter chegado, estar na fila ou já estar autorizadas; recebem novo número se emitidas em contingência; as não autorizadas têm a numeração inutilizada | MOC 7.0, Anexo III, 2.3.3 |
+| `nProt` (`TProt`) tem 15 ou 17 dígitos | `tiposBasico_v4.00.xsd` |
+
+### 9.2 Decisões
+
+| # | Decisão | Motivo |
+|---|---|---|
+| D1 | Número consumido na mesma transação que grava o XML assinado e válido no XSD | falha de montagem, assinatura ou XSD não queima número |
+| D2 | Documento travado antes da sequência, sempre nessa ordem | emissões concorrentes não entram em deadlock |
+| D3 | Tentativa de comunicação gravada ANTES da chamada à SEFAZ | queda do processo deixa rastro recuperável |
+| D4 | Desfecho desconhecido (timeout, duplicidade, código não reconhecido, protocolo de outra chave) vai para `PENDING_RECONCILIATION` | confirmado pelo Anexo III, 2.3.3 |
+| D5 | Nova aresta `SENDING → QUEUED` apenas para falha comprovadamente anterior ao envio ou 108/109 | nada foi processado; o mesmo XML volta à fila |
+| D6 | Consulta com 217 mantém a pendência | 217 não prova que a nota não esteja na fila da SEFAZ |
+| D7 | Rejeição normal mantém o número ao reemitir | a nota rejeitada não existe na SEFAZ; a proibição do Anexo III refere-se às pendentes de retorno |
+| D8 | Migrations SQL próprias com checksum, Drizzle só para consultas | triggers e RLS ficam revisáveis como SQL; um teste compara o mapeamento com o banco |
+| D9 | Invariantes fiscais também em trigger (SQLSTATE `NFE01`–`NFE06`) | defesa contra defeito de aplicação e SQL manual |
+| D10 | RLS com `FORCE` e papel da aplicação sem superusuário nem `BYPASSRLS`, verificado na inicialização | isolamento entre tenants não depende de cada consulta lembrar o filtro |
+| D11 | Postgres real nos testes via `embedded-postgres`, sem Docker | o daemon Docker não estava disponível nesta máquina |
+| D12 | Provider SOAP da SEFAZ explicitamente não implementado; mock recusa produção | sem certificado A1 e sem credenciamento em homologação |

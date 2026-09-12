@@ -1,5 +1,5 @@
 {
-  "name": "@nfe/core",
+  "name": "@nfe/emission",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,11 +14,16 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"
   },
+  "dependencies": {
+    "@nfe/core": "*",
+    "@nfe/sefaz": "*"
+  },
   "devDependencies": {
+    "@nfe/signer": "*",
+    "@nfe/xsd": "*",
     "@types/node": "^22.20.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

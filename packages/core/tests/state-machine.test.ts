@@ -69,6 +69,16 @@ describe('falha de comunicação nunca vira retransmissão', () => {
     expect(canTransition(NfeStatus.PendingReconciliation, NfeStatus.Queued)).toBe(false);
   });
 
+  it('falha com desfecho conhecido antes do envio devolve à fila', () => {
+    expect(canTransition(NfeStatus.Sending, NfeStatus.Queued)).toBe(true);
+  });
+
+  it('erro de comunicação só sai por reconciliação, nunca pela fila', () => {
+    expect(reachableFrom(NfeStatus.CommunicationError)).toEqual([
+      NfeStatus.PendingReconciliation,
+    ]);
+  });
+
   it('reconciliação resolve para o desfecho descoberto na consulta', () => {
     expect(canTransition(NfeStatus.PendingReconciliation, NfeStatus.Authorized)).toBe(true);
     expect(canTransition(NfeStatus.PendingReconciliation, NfeStatus.Rejected)).toBe(true);

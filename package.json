@@ -14,7 +14,7 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @nfe/core && npm run build -w @nfe/xsd && npm run build -w @nfe/signer && npm run build -w @nfe/sefaz && npm run build -w @nfe/emission && npm run build -w @nfe/persistence",
     "verify": "npm run lint && npm run typecheck && npm run test && npm run build && node scripts/smoke.mjs",
     "smoke": "npm run build && node scripts/smoke.mjs"
   },
