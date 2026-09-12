@@ -193,3 +193,44 @@ contingência, DANFE definitivo, motor IBS/CBS completo.
 | D10 | RLS com `FORCE` e papel da aplicação sem superusuário nem `BYPASSRLS`, verificado na inicialização | isolamento entre tenants não depende de cada consulta lembrar o filtro |
 | D11 | Postgres real nos testes via `embedded-postgres`, sem Docker | o daemon Docker não estava disponível nesta máquina |
 | D12 | Provider SOAP da SEFAZ explicitamente não implementado; mock recusa produção | sem certificado A1 e sem credenciamento em homologação |
+
+## 10. Fatia 3 — inutilização de numeração e política de reconciliação (2026-09-12)
+
+### 10.1 Base oficial consultada
+
+| Fato | Fonte |
+|---|---|
+| Serviço `nfeInutilizacao`, síncrono; pedido `inutNFe` assinado sobre `infInut` | MOC 7.0, Visão Geral, 5.3.1 a 5.3.3 |
+| `Id` = "ID" + cUF + ano + CNPJ + modelo + série + nNFIni + nNFFin (43 posições) | MOC 7.0, Visão Geral, tabela 5-9; pattern `ID[0-9]{4}[0-9A-Z]{12}[0-9]{25}` em `leiauteInutNFe_v4.00.xsd` |
+| `xJust` de 15 a 255 caracteres; `ano` com 2 dígitos | `TJust` e `Tano` em `tiposBasico_v4.00.xsd` |
+| 102 homologa; resposta traz `nProt` e `dhRecbto` | MOC 7.0, Visão Geral, 5.3.2 e 5.3.5 |
+| Regras: 453/454 (ano), 224 (faixa invertida), 201 (mais de 10.000 números), 502 (Id divergente) | MOC 7.0, Visão Geral, 5.3.4, regras I02b a I04.a |
+| 563 pedido com a mesma faixa; a resposta traz o `nProt` do pedido anterior | regra I07 e 5.3.5 (NT 2015.002) |
+| 256 número da faixa já inutilizado; 241 número da faixa já utilizado | regras I07a e I08 |
+| 206 autorização de NF-e com número inutilizado | MOC 7.0, Anexo I, 4.4.2 |
+| Pendentes de retorno não autorizadas nem denegadas têm a numeração inutilizada | MOC 7.0, Anexo III, 2.3.3 |
+| Consulta repetida em looping é consumo indevido | MOC 7.0, Visão Geral, tabela 4-9 |
+
+Os schemas de inutilização não estão no PL_010f. O pacote mais recente que os
+publica é o **PL_010d_v1.03** (CNPJ alfanumérico), versionado sem modificação em
+`schemas/nfe/PL_010d_v1.03/`. `tiposBasico_v4.00.xsd` e
+`xmldsig-core-schema_v1.01.xsd` são idênticos byte a byte nos dois pacotes.
+
+Nenhum pacote 010 publica o arquivo raiz `inutNFe_v4.00.xsd` citado no MOC: o
+leiaute declara `TInutNFe` e só o usa dentro de `ProcInutNFe`. A validação usa
+uma raiz montada em memória que apenas declara `<xs:element name="inutNFe"
+type="TInutNFe"/>` sobre o leiaute oficial.
+
+### 10.2 Decisões
+
+| # | Decisão | Motivo |
+|---|---|---|
+| D13 | Novo estado terminal `NUMBER_VOIDED`, alcançável de `PENDING_RECONCILIATION`, `REJECTED`, `LOCAL_VALIDATION_ERROR` e `DRAFT` (este só com número) | fecha o ciclo das pendentes de retorno sem abrir caminho de retransmissão |
+| D14 | Inutilização por documento, sempre de um único número, com os campos lidos da própria chave de acesso | recai exatamente sobre o número que foi ou pode ter sido transmitido |
+| D15 | Ano da inutilização = ano da chave de acesso | decisão arquitetural; o MOC não define qual ano usar, e a regra I08 não usa o ano |
+| D16 | 241 mantém a pendência; a consulta decide | a SEFAZ é o árbitro: se a nota foi processada, ela não inutiliza |
+| D17 | 563 com `nProt` conta como inutilização confirmada; sem `nProt`, não | a NT 2015.002 garante o protocolo anterior na resposta |
+| D18 | 256 conta como inutilizado porque o pedido cobre um único número | "uma NF-e da faixa já inutilizada" só pode ser este número |
+| D19 | Política de reconciliação parametrizada: 1 min até a primeira consulta, intervalos de 2, 5, 15, 30 e 60 min, 3 consultas com 217 e 60 min desde o envio para liberar a inutilização | valores são decisão arquitetural, não regra oficial; espaçamento crescente evita consumo indevido |
+| D20 | O ciclo de reconciliação consulta e aponta, mas não inutiliza sozinho | inutilização é ato fiscal e exige chamada explícita |
+| D21 | Pedido de inutilização e protocolo guardados em `number_voids`, imutáveis após homologação (SQLSTATE `NFE07`) | são a prova da inutilização |

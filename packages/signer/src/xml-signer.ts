@@ -1,8 +1,8 @@
 /**
- * Assinatura digital XML da NF-e (XML-DSig envelopada).
+ * Assinatura digital XML de documentos da NF-e (XML-DSig envelopada).
  *
- * Algoritmos fixados pelo `xmldsig-core-schema_v1.01.xsd` do PL_010f_v1.04 — o
- * schema declara cada um com `fixed`, então não há escolha a fazer:
+ * Algoritmos fixados pelo `xmldsig-core-schema_v1.01.xsd` — o schema declara
+ * cada um com `fixed`, então não há escolha a fazer:
  *
  * - canonicalização: C14N 1.0 inclusiva (`REC-xml-c14n-20010315`);
  * - assinatura: RSA-SHA1;
@@ -17,10 +17,13 @@
  * testes, uma implementação independente (`xml-crypto`) verifica as assinaturas
  * produzidas aqui.
  *
- * A assinatura cobre `infNFe`. `Signature` é inserida como último filho de
- * `NFe`, irmã de `infNFe`, então o transform `enveloped-signature` não remove
- * nada do conteúdo assinado — e o conteúdo fiscal sai byte a byte idêntico ao
- * de entrada.
+ * Dois documentos usam o mesmo esquema de assinatura, mudando só os nomes:
+ * - NF-e: `Signature` assina `infNFe`, dentro de `NFe`;
+ * - pedido de inutilização: `Signature` assina `infInut`, dentro de `inutNFe`.
+ *
+ * `Signature` é inserida como último filho da raiz, irmã do elemento assinado,
+ * então o transform `enveloped-signature` não remove nada do conteúdo assinado
+ * — e o conteúdo fiscal sai byte a byte idêntico ao de entrada.
  */
 
 import {
@@ -46,15 +49,42 @@ const NAMESPACES = {
   nfe: 'http://www.portalfiscal.inf.br/nfe',
   ds: XMLDSIG_NAMESPACE,
 };
-
-/** Atributo `Id` de `infNFe`: prefixo `NFe` e o pattern de `TChNFe`. */
-const INF_NFE_ID = /^NFe[0-9]{6}[0-9A-Z]{12}[0-9]{26}$/;
-const ROOT_CLOSING_TAG = '</NFe>';
 const CANONICAL = { mode: XmlC14NMode.XML_C14N_1_0 };
 
-const SIGNATURE_PATH = '/nfe:NFe/ds:Signature';
-const SIGNED_INFO_PATH = `${SIGNATURE_PATH}/ds:SignedInfo`;
-const REFERENCE_PATH = `${SIGNED_INFO_PATH}/ds:Reference`;
+/** Documento assinável: raiz, elemento assinado e formato do seu `Id`. */
+interface SignatureProfile {
+  readonly root: string;
+  readonly signed: string;
+  readonly idPattern: RegExp;
+  readonly idDescription: string;
+}
+
+const NFE_PROFILE: SignatureProfile = Object.freeze({
+  root: 'NFe',
+  signed: 'infNFe',
+  // Prefixo `NFe` e o pattern de `TChNFe`.
+  idPattern: /^NFe[0-9]{6}[0-9A-Z]{12}[0-9]{26}$/,
+  idDescription: 'NFe + chave de acesso',
+});
+
+const INUTILIZATION_PROFILE: SignatureProfile = Object.freeze({
+  root: 'inutNFe',
+  signed: 'infInut',
+  // Pattern do atributo `Id` de `TInutNFe` no PL_010d_v1.03.
+  idPattern: /^ID[0-9]{4}[0-9A-Z]{12}[0-9]{25}$/,
+  idDescription: 'ID + campos do pedido de inutilização',
+});
+
+function paths(profile: SignatureProfile) {
+  const signature = `/nfe:${profile.root}/ds:Signature`;
+  const signedInfo = `${signature}/ds:SignedInfo`;
+  return {
+    signature,
+    signedInfo,
+    reference: `${signedInfo}/ds:Reference`,
+    signedElement: `/nfe:${profile.root}/nfe:${profile.signed}`,
+  };
+}
 
 export interface SigningCredentials {
   readonly privateKeyPem: string;
@@ -137,8 +167,8 @@ function sha1Base64(content: string): string {
  * Estrutura de `Signature`, elemento a elemento como no schema.
  *
  * É montada por template porque todo valor interpolado tem alfabeto restrito e
- * já validado — `Id` pelo pattern de `TChNFe`, os demais em base64 produzido
- * aqui mesmo — e nenhum precisa de escape. A forma canônica usada no cálculo é
+ * já validado — `Id` pelo pattern do perfil, os demais em base64 produzido aqui
+ * mesmo — e nenhum precisa de escape. A forma canônica usada no cálculo é
  * extraída pelo libxml2 do documento real, e não deste texto.
  */
 function signatureMarkup(
@@ -167,12 +197,13 @@ function signatureMarkup(
   );
 }
 
-function insertSignature(xml: string, markup: string): string {
-  const index = xml.lastIndexOf(ROOT_CLOSING_TAG);
-  if (index < 0 || xml.slice(index + ROOT_CLOSING_TAG.length).trim() !== '') {
+function insertSignature(profile: SignatureProfile, xml: string, markup: string): string {
+  const closingTag = `</${profile.root}>`;
+  const index = xml.lastIndexOf(closingTag);
+  if (index < 0 || xml.slice(index + closingTag.length).trim() !== '') {
     throw new XmlSignatureError(
       'DOCUMENT_NOT_SIGNABLE',
-      'Documento não termina no fechamento do elemento raiz NFe.',
+      `Documento não termina no fechamento do elemento raiz ${profile.root}.`,
     );
   }
   return xml.slice(0, index) + markup + xml.slice(index);
@@ -183,48 +214,53 @@ interface SignableContent {
   readonly digestValue: string;
 }
 
-function readSignableContent(document: XmlDocument): SignableContent {
-  if (findElement(document, SIGNATURE_PATH) !== null) {
+function readSignableContent(profile: SignatureProfile, document: XmlDocument): SignableContent {
+  const { signature, signedElement } = paths(profile);
+  if (findElement(document, signature) !== null) {
     throw new XmlSignatureError('ALREADY_SIGNED', 'O documento já contém assinatura.');
   }
 
-  const infNFe = findElement(document, '/nfe:NFe/nfe:infNFe');
-  if (infNFe === null) {
+  const signed = findElement(document, signedElement);
+  if (signed === null) {
     throw new XmlSignatureError(
       'DOCUMENT_NOT_SIGNABLE',
-      'Elemento infNFe não encontrado sob NFe no namespace da NF-e.',
+      `Elemento ${profile.signed} não encontrado sob ${profile.root} no namespace da NF-e.`,
     );
   }
 
-  const referenceId = infNFe.attr('Id')?.value;
-  if (referenceId === undefined || !INF_NFE_ID.test(referenceId)) {
+  const referenceId = signed.attr('Id')?.value;
+  if (referenceId === undefined || !profile.idPattern.test(referenceId)) {
     throw new XmlSignatureError(
       'DOCUMENT_NOT_SIGNABLE',
-      'Atributo Id de infNFe ausente ou fora do formato NFe + chave de acesso.',
+      `Atributo Id de ${profile.signed} ausente ou fora do formato ${profile.idDescription}.`,
     );
   }
 
-  return { referenceId, digestValue: sha1Base64(infNFe.canonicalizeToString(CANONICAL)) };
+  return { referenceId, digestValue: sha1Base64(signed.canonicalizeToString(CANONICAL)) };
 }
 
-export function signNfeXml(
+function signEnveloped(
+  profile: SignatureProfile,
   unsignedXml: string,
   credentials: SigningCredentials,
-  options: SignOptions = {},
+  options: SignOptions,
 ): string {
   const { privateKey, certificate } = loadCredentials(credentials, options.now ?? new Date());
-  const { referenceId, digestValue } = withDocument(unsignedXml, readSignableContent);
+  const { referenceId, digestValue } = withDocument(unsignedXml, (document) =>
+    readSignableContent(profile, document),
+  );
   const certificateValue = certificate.raw.toString('base64');
 
   // SignedInfo é canonicalizado dentro do documento final, para herdar exatamente
   // os namespaces em escopo que o verificador vai enxergar.
   const draft = insertSignature(
+    profile,
     unsignedXml,
     signatureMarkup(referenceId, digestValue, '', certificateValue),
   );
 
   const signatureValue = withDocument(draft, (document) => {
-    const signedInfo = findElement(document, SIGNED_INFO_PATH);
+    const signedInfo = findElement(document, paths(profile).signedInfo);
     if (signedInfo === null) {
       throw new XmlSignatureError('DOCUMENT_NOT_SIGNABLE', 'Falha ao localizar SignedInfo.');
     }
@@ -234,9 +270,27 @@ export function signNfeXml(
   });
 
   return insertSignature(
+    profile,
     unsignedXml,
     signatureMarkup(referenceId, digestValue, signatureValue, certificateValue),
   );
+}
+
+export function signNfeXml(
+  unsignedXml: string,
+  credentials: SigningCredentials,
+  options: SignOptions = {},
+): string {
+  return signEnveloped(NFE_PROFILE, unsignedXml, credentials, options);
+}
+
+/** Assina o pedido de inutilização (`inutNFe`), cobrindo `infInut`. */
+export function signInutilizationXml(
+  unsignedXml: string,
+  credentials: SigningCredentials,
+  options: SignOptions = {},
+): string {
+  return signEnveloped(INUTILIZATION_PROFILE, unsignedXml, credentials, options);
 }
 
 export type SignatureVerification =
@@ -249,40 +303,34 @@ function textContent(node: XmlElement | null): string {
   return (node?.content ?? '').replace(/\s+/g, '');
 }
 
-const ALGORITHM_CHECKS: readonly (readonly [string, string])[] = [
-  [`${SIGNED_INFO_PATH}/ds:CanonicalizationMethod`, SIGNATURE_ALGORITHMS.canonicalization],
-  [`${SIGNED_INFO_PATH}/ds:SignatureMethod`, SIGNATURE_ALGORITHMS.signature],
-  [`${REFERENCE_PATH}/ds:DigestMethod`, SIGNATURE_ALGORITHMS.digest],
-];
-
 const EXPECTED_TRANSFORMS = [
   SIGNATURE_ALGORITHMS.envelopedSignature,
   SIGNATURE_ALGORITHMS.canonicalization,
 ];
 
-/**
- * Verifica integridade e autoria criptográfica da assinatura.
- *
- * Não valida a cadeia do certificado até a AC raiz da ICP-Brasil nem consulta
- * revogação — isso é responsabilidade do módulo de certificados.
- */
-export function verifyNfeSignature(signedXml: string): SignatureVerification {
+function verifyEnveloped(profile: SignatureProfile, signedXml: string): SignatureVerification {
+  const locations = paths(profile);
   return withDocument(signedXml, (document) => {
-    const infNFe = findElement(document, '/nfe:NFe/nfe:infNFe');
-    const signedInfo = findElement(document, SIGNED_INFO_PATH);
-    const reference = findElement(document, REFERENCE_PATH);
-    if (infNFe === null || signedInfo === null || reference === null) {
+    const signed = findElement(document, locations.signedElement);
+    const signedInfo = findElement(document, locations.signedInfo);
+    const reference = findElement(document, locations.reference);
+    if (signed === null || signedInfo === null || reference === null) {
       return invalid('Estrutura de assinatura ausente ou incompleta.');
     }
 
-    for (const [xpath, expected] of ALGORITHM_CHECKS) {
+    const algorithmChecks: readonly (readonly [string, string])[] = [
+      [`${locations.signedInfo}/ds:CanonicalizationMethod`, SIGNATURE_ALGORITHMS.canonicalization],
+      [`${locations.signedInfo}/ds:SignatureMethod`, SIGNATURE_ALGORITHMS.signature],
+      [`${locations.reference}/ds:DigestMethod`, SIGNATURE_ALGORITHMS.digest],
+    ];
+    for (const [xpath, expected] of algorithmChecks) {
       if (findElement(document, xpath)?.attr('Algorithm')?.value !== expected) {
         return invalid(`Algoritmo diferente do fixado pelo schema em ${xpath}.`);
       }
     }
 
     const transforms = document
-      .find(`${REFERENCE_PATH}/ds:Transforms/ds:Transform`, NAMESPACES)
+      .find(`${locations.reference}/ds:Transforms/ds:Transform`, NAMESPACES)
       .map((node) => (node instanceof XmlElement ? node.attr('Algorithm')?.value : undefined));
     if (
       transforms.length !== EXPECTED_TRANSFORMS.length ||
@@ -291,21 +339,25 @@ export function verifyNfeSignature(signedXml: string): SignatureVerification {
       return invalid('Transforms diferentes dos fixados pelo schema.');
     }
 
-    const referenceId = infNFe.attr('Id')?.value;
+    const referenceId = signed.attr('Id')?.value;
     if (referenceId === undefined || reference.attr('URI')?.value !== `#${referenceId}`) {
-      return invalid('A Reference não aponta para o Id de infNFe.');
+      return invalid(`A Reference não aponta para o Id de ${profile.signed}.`);
     }
 
-    const digestValue = textContent(findElement(document, `${REFERENCE_PATH}/ds:DigestValue`));
-    if (sha1Base64(infNFe.canonicalizeToString(CANONICAL)) !== digestValue) {
-      return invalid('DigestValue não confere: o conteúdo de infNFe foi alterado após a assinatura.');
+    const digestValue = textContent(findElement(document, `${locations.reference}/ds:DigestValue`));
+    if (sha1Base64(signed.canonicalizeToString(CANONICAL)) !== digestValue) {
+      return invalid(
+        `DigestValue não confere: o conteúdo de ${profile.signed} foi alterado após a assinatura.`,
+      );
     }
 
     let certificate: X509Certificate;
     try {
       certificate = new X509Certificate(
         Buffer.from(
-          textContent(findElement(document, `${SIGNATURE_PATH}/ds:KeyInfo/ds:X509Data/ds:X509Certificate`)),
+          textContent(
+            findElement(document, `${locations.signature}/ds:KeyInfo/ds:X509Data/ds:X509Certificate`),
+          ),
           'base64',
         ),
       );
@@ -313,7 +365,7 @@ export function verifyNfeSignature(signedXml: string): SignatureVerification {
       return invalid('Certificado de KeyInfo ilegível.');
     }
 
-    const signatureValue = textContent(findElement(document, `${SIGNATURE_PATH}/ds:SignatureValue`));
+    const signatureValue = textContent(findElement(document, `${locations.signature}/ds:SignatureValue`));
     const matches = createVerify('RSA-SHA1')
       .update(signedInfo.canonicalizeToString(CANONICAL), 'utf8')
       .verify(certificate.publicKey, signatureValue, 'base64');
@@ -322,4 +374,18 @@ export function verifyNfeSignature(signedXml: string): SignatureVerification {
       ? { valid: true, certificate }
       : invalid('SignatureValue não confere com SignedInfo e o certificado informado.');
   });
+}
+
+/**
+ * Verifica integridade e autoria criptográfica da assinatura.
+ *
+ * Não valida a cadeia do certificado até a AC raiz da ICP-Brasil nem consulta
+ * revogação — isso é responsabilidade do módulo de certificados.
+ */
+export function verifyNfeSignature(signedXml: string): SignatureVerification {
+  return verifyEnveloped(NFE_PROFILE, signedXml);
+}
+
+export function verifyInutilizationSignature(signedXml: string): SignatureVerification {
+  return verifyEnveloped(INUTILIZATION_PROFILE, signedXml);
 }

@@ -9,7 +9,7 @@
 
 import { TechnicalError } from '@nfe/core';
 
-export type SefazOperation = 'AUTHORIZATION' | 'PROTOCOL_QUERY';
+export type SefazOperation = 'AUTHORIZATION' | 'PROTOCOL_QUERY' | 'NUMBER_VOID';
 
 /**
  * - `NOT_SENT`: a requisição comprovadamente não saiu (conexão recusada, DNS,

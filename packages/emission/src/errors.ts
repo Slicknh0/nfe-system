@@ -59,6 +59,23 @@ export class NumberedInvoiceChangeError extends FiscalError {
   }
 }
 
+/** A política de reconciliação ainda não libera a inutilização da nota pendente. */
+export class VoidNotYetAllowedError extends FiscalError {
+  constructor(
+    readonly invoiceId: string,
+    detail: string,
+  ) {
+    super(`A inutilização do número do documento ${invoiceId} ainda não está liberada: ${detail}`);
+  }
+}
+
+/** Pedido de inutilização montado e assinado, mas reprovado no XSD oficial. */
+export class InvalidVoidRequestError extends FiscalError {
+  constructor(readonly problems: readonly string[]) {
+    super(`Pedido de inutilização reprovado na validação de schema: ${problems.join('; ')}`);
+  }
+}
+
 /** Recusa esperada do assinador: certificado vencido, chave divergente, credencial ilegível. */
 export class SigningRefusedError extends Error {
   constructor(

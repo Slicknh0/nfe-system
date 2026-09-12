@@ -235,17 +235,32 @@ try {
     legalName: 'Loja Exemplo Comercio de Roupas Ltda',
   });
 
+  const store = new persistence.PostgresEmissionStore(db);
   const mock = new sefaz.MockSefazProvider().scriptAuthorizations({
     type: 'lose-response-after-processing',
   });
   const service = new emission.EmissionService({
-    store: new persistence.PostgresEmissionStore(db),
+    store,
     sefaz: mock,
     signer: {
-      sign: ({ unsignedXml, now }) =>
-        Promise.resolve(signer.signNfeXml(unsignedXml, credentials, { now })),
+      sign: ({ document, unsignedXml, now }) =>
+        Promise.resolve(
+          (document === 'NFE' ? signer.signNfeXml : signer.signInutilizationXml)(unsignedXml, credentials, {
+            now,
+          }),
+        ),
     },
-    schemaValidator: validator,
+    schemaValidator: {
+      validate: (xml, document) =>
+        validator.validate(xml, document === 'NFE' ? xsd.PL_010F : xsd.PL_010D_INUTILIZATION),
+    },
+    // Sem espera entre consultas: o smoke verifica o encadeamento, não o relógio.
+    reconciliationPolicy: {
+      firstQueryDelayMs: 0,
+      queryIntervalsMs: [0],
+      notFoundQueriesBeforeVoid: 3,
+      minimumAgeBeforeVoidMs: 0,
+    },
   });
 
   const { number: _number, randomCode: _randomCode, issuedAt: _issuedAt, ...draftIdentification } =
@@ -283,11 +298,49 @@ try {
   }
   check('o banco recusa reabrir NF-e autorizada, mesmo com SQL direto', sqlState, 'NFE02');
 
+  console.log('\n— Inutilização: nota que nunca chegou à SEFAZ ———————————');
+
+  mock.scriptAuthorizations({ type: 'lose-request' });
+  const { invoice: lostInvoice } = await service.createDraft({
+    tenantId,
+    issuerId,
+    idempotencyKey: 'smoke-2',
+    draft,
+  });
+  const lost = { tenantId, invoiceId: lostInvoice.id };
+  await service.issue(lost);
+  await service.transmit(lost);
+  const queries = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    queries.push((await service.reconcile(lost)).outcome);
+  }
+  check('três consultas devolvem 217', queries.join(','), 'NOT_FOUND,NOT_FOUND,NOT_FOUND');
+
+  const voided = await service.voidNumber({
+    ...lost,
+    justification: 'NF-e pendente de retorno nao localizada na SEFAZ apos consultas',
+  });
+  check('numeração inutilizada na SEFAZ', voided.invoice.status, 'NUMBER_VOIDED');
+
+  const voidRecord = await store.findNumberVoid(tenantId, lostInvoice.id);
+  check('protocolo de inutilização gravado', voidRecord?.protocol?.statusCode, 102);
+  check(
+    'pedido de inutilização assinado passa no XSD oficial (PL_010d)',
+    validator.validate(voidRecord.signedXml, xsd.PL_010D_INUTILIZATION).valid,
+    true,
+  );
+  check('assinatura do pedido de inutilização confere', signer.verifyInutilizationSignature(voidRecord.signedXml).valid, true);
+
   await app.end();
   await admin.end();
 } finally {
   await server.stop();
-  rmSync(databaseDir, { recursive: true, force: true });
+  // No Windows o Postgres pode ainda segurar arquivos logo após o stop (EBUSY).
+  try {
+    rmSync(databaseDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  } catch {
+    console.warn(`        diretório temporário não removido: ${databaseDir}`);
+  }
 }
 
 validator.dispose();

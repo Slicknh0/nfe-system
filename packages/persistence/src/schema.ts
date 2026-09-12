@@ -91,6 +91,30 @@ export const invoiceStatusHistory = pgTable('invoice_status_history', {
   occurredAt: timestamptz('occurred_at').notNull().defaultNow(),
 });
 
+export const numberVoids = pgTable('number_voids', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id').notNull(),
+  invoiceId: uuid('invoice_id').notNull(),
+  environment: smallint('environment').notNull(),
+  model: smallint('model').notNull().default(55),
+  series: integer('series').notNull(),
+  firstNumber: integer('first_number').notNull(),
+  lastNumber: integer('last_number').notNull(),
+  year: smallint('year').notNull(),
+  justification: text('justification').notNull(),
+  requestId: char('request_id', { length: 43 }).notNull(),
+  signedXml: text('signed_xml').notNull(),
+  status: text('status').notNull(),
+  protocolNumber: varchar('protocol_number', { length: 17 }),
+  protocolStatusCode: integer('protocol_status_code'),
+  protocolStatusReason: text('protocol_status_reason'),
+  protocolReceivedAt: timestamptz('protocol_received_at'),
+  lastStatusCode: integer('last_status_code'),
+  lastStatusReason: text('last_status_reason'),
+  createdAt: timestamptz('created_at').notNull().defaultNow(),
+  updatedAt: timestamptz('updated_at').notNull().defaultNow(),
+});
+
 export const sefazAttempts = pgTable('sefaz_attempts', {
   id: uuid('id').primaryKey().defaultRandom(),
   tenantId: uuid('tenant_id').notNull(),

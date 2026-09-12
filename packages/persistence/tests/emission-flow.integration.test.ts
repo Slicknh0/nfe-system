@@ -5,17 +5,27 @@
 
 import { fileURLToPath } from 'node:url';
 import { NfeStatus, isValidAccessKey } from '@nfe/core';
-import { EmissionService, type InvoiceReference } from '@nfe/emission';
+import { EmissionService, type InvoiceReference, type ReconciliationPolicy } from '@nfe/emission';
 import { MockSefazProvider } from '@nfe/sefaz';
 import { verifyNfeSignature } from '@nfe/signer';
-import { NfeSchemaValidator } from '@nfe/xsd';
+import { NfeSchemaValidator, PL_010D_INUTILIZATION } from '@nfe/xsd';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { makeDraft, testSigner } from '../../emission/tests/support/fixtures.js';
+import { makeDraft, schemaValidatorFor, testSigner } from '../../emission/tests/support/fixtures.js';
 import { PostgresEmissionStore } from '../src/index.js';
 import { createScope, createTestDatabase, type TenantScope, type TestDatabase } from './support/database.js';
 
 const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url));
 const validator = new NfeSchemaValidator(repositoryRoot);
+const JUSTIFICATION = 'NF-e pendente de retorno nao localizada na SEFAZ apos consultas';
+
+// Sem espera: aqui o que se verifica é a persistência. Os intervalos da política
+// são testados com relógio controlado em @nfe/emission.
+const IMMEDIATE_POLICY: ReconciliationPolicy = {
+  firstQueryDelayMs: 0,
+  queryIntervalsMs: [0],
+  notFoundQueriesBeforeVoid: 3,
+  minimumAgeBeforeVoidMs: 0,
+};
 
 let database: TestDatabase;
 let store: PostgresEmissionStore;
@@ -34,7 +44,13 @@ beforeAll(async () => {
 beforeEach(async () => {
   scope = await createScope(database.db, 'fluxo');
   mock = new MockSefazProvider();
-  service = new EmissionService({ store, sefaz: mock, signer, schemaValidator: validator });
+  service = new EmissionService({
+    store,
+    sefaz: mock,
+    signer,
+    schemaValidator: schemaValidatorFor(validator),
+    reconciliationPolicy: IMMEDIATE_POLICY,
+  });
 });
 
 afterAll(async () => {
@@ -94,6 +110,60 @@ describe('emissão concorrente', () => {
 
     expect(results.filter((result) => result.created)).toHaveLength(1);
     expect(new Set(results.map((result) => result.invoice.id)).size).toBe(1);
+  });
+});
+
+describe('inutilização de nota pendente de retorno', () => {
+  async function pendingHeldInQueue(): Promise<InvoiceReference> {
+    mock.scriptAuthorizations({ type: 'hold-in-queue' });
+    const reference = await newDraft();
+    await service.issue(reference);
+    expect((await service.transmit(reference)).invoice.status).toBe(NfeStatus.PendingReconciliation);
+    for (let query = 0; query < 3; query += 1) {
+      expect((await service.reconcile(reference)).outcome).toBe('NOT_FOUND');
+    }
+    return reference;
+  }
+
+  it('inutilizada antes do processamento: protocolo gravado no banco e fila sem efeito', async () => {
+    const reference = await pendingHeldInQueue();
+
+    const outcome = await service.voidNumber({ ...reference, justification: JUSTIFICATION });
+    expect(outcome).toMatchObject({
+      outcome: 'VOIDED',
+      voided: true,
+      invoice: { status: NfeStatus.NumberVoided },
+    });
+    expect(mock.releaseHeldAuthorizations()).toBe(0);
+
+    const { rows } = await database.admin.query<{ status: string; protocol_number: string | null }>(
+      'SELECT status, protocol_number FROM number_voids WHERE invoice_id = $1',
+      [reference.invoiceId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe('VOIDED');
+    expect(rows[0]?.protocol_number).toMatch(/^\d{15}$/);
+    expect((await attemptsOf(reference.invoiceId)).map((attempt) => attempt.outcome)).toEqual([
+      'NO_RESPONSE',
+      'NOT_FOUND',
+      'NOT_FOUND',
+      'NOT_FOUND',
+      'VOIDED',
+    ]);
+
+    const record = await store.findNumberVoid(reference.tenantId, reference.invoiceId);
+    expect(validator.validate(record!.signedXml, PL_010D_INUTILIZATION).errors).toEqual([]);
+  });
+
+  it('processada antes da inutilização: a SEFAZ recusa (241) e a consulta autoriza', async () => {
+    const reference = await pendingHeldInQueue();
+    expect(mock.releaseHeldAuthorizations()).toBe(1);
+
+    expect((await service.voidNumber({ ...reference, justification: JUSTIFICATION })).outcome).toBe(
+      'NUMBER_ALREADY_USED',
+    );
+    expect((await store.findNumberVoid(reference.tenantId, reference.invoiceId))?.status).toBe('REJECTED');
+    expect(await service.reconcile(reference)).toMatchObject({ outcome: 'AUTHORIZED', resolved: true });
   });
 });
 

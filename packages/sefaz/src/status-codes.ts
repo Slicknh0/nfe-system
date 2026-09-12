@@ -15,6 +15,7 @@
 import type {
   AuthorizationResult,
   InvoiceProtocol,
+  NumberVoidResult,
   ProtocolQueryResult,
   StatusReply,
 } from './provider.js';
@@ -22,6 +23,7 @@ import type {
 export const SefazStatus = Object.freeze({
   AUTHORIZED: 100,
   CANCELLED: 101,
+  NUMBER_VOID_HOMOLOGATED: 102,
   BATCH_RECEIVED: 103,
   BATCH_PROCESSED: 104,
   BATCH_IN_PROCESSING: 105,
@@ -31,11 +33,19 @@ export const SefazStatus = Object.freeze({
   AUTHORIZED_OUT_OF_TIME: 150,
   CANCELLED_OUT_OF_TIME: 151,
   DUPLICATE_INVOICE: 204,
+  /** Autorização pedida para número inutilizado. */
+  INVOICE_ALREADY_VOIDED: 206,
   INVOICE_NOT_FOUND: 217,
+  /** Inutilização, regra I08: um número da faixa já foi utilizado. */
+  NUMBER_ALREADY_USED: 241,
+  /** Inutilização, regra I07a: uma NF-e da faixa já está inutilizada. */
+  RANGE_ALREADY_VOIDED: 256,
   DENIED_ISSUER_IRREGULAR: 301,
   DENIED_RECIPIENT_IRREGULAR: 302,
   DENIED_RECIPIENT_NOT_ENABLED: 303,
   DUPLICATE_INVOICE_DIFFERENT_KEY: 539,
+  /** Inutilização, regra I07: pedido com a mesma faixa já existe. */
+  DUPLICATE_VOID_REQUEST: 563,
 } as const);
 
 const AUTHORIZED = new Set<number>([SefazStatus.AUTHORIZED, SefazStatus.AUTHORIZED_OUT_OF_TIME]);
@@ -169,6 +179,47 @@ export function interpretProtocolQueryResponse(response: ProtocolQueryResponse):
   }
   if (isRejectionCode(code)) {
     return { kind: 'QUERY_REJECTED', ...reply(status) };
+  }
+  return { kind: 'UNRECOGNIZED', ...reply(status) };
+}
+
+/** Resposta de `nfeInutilizacao` já extraída do SOAP (`retInutNFe/infInut`). */
+export interface NumberVoidResponse {
+  readonly status: StatusReply;
+  /** `nProt`: presente na homologação (102) e, pela NT 2015.002, na rejeição 563. */
+  readonly protocolNumber?: string;
+  /** `dhRecbto`: informado inclusive em rejeição. */
+  readonly receivedAt?: Date;
+}
+
+/**
+ * Interpreta o retorno da inutilização (MOC 7.0, Visão Geral, 5.3.4 e 5.3.5).
+ *
+ * 563 com `nProt` é tratado como inutilização confirmada: a SEFAZ informa o
+ * protocolo do pedido idêntico já homologado. Sem `nProt`, não há prova, e o
+ * resultado não é presumido.
+ */
+export function interpretNumberVoidResponse(response: NumberVoidResponse): NumberVoidResult {
+  const { status, protocolNumber, receivedAt } = response;
+  const code = status.statusCode;
+
+  if (code === SefazStatus.NUMBER_VOID_HOMOLOGATED || code === SefazStatus.DUPLICATE_VOID_REQUEST) {
+    if (protocolNumber === undefined || receivedAt === undefined) {
+      return { kind: 'UNRECOGNIZED', ...reply(status) };
+    }
+    return { kind: 'VOIDED', protocol: { ...reply(status), protocolNumber, receivedAt } };
+  }
+  if (code === SefazStatus.RANGE_ALREADY_VOIDED) {
+    return { kind: 'RANGE_ALREADY_VOIDED', ...reply(status) };
+  }
+  if (code === SefazStatus.NUMBER_ALREADY_USED) {
+    return { kind: 'NUMBER_ALREADY_USED', ...reply(status) };
+  }
+  if (SERVICE_UNAVAILABLE.has(code)) {
+    return { kind: 'SERVICE_UNAVAILABLE', ...reply(status) };
+  }
+  if (isRejectionCode(code)) {
+    return { kind: 'REJECTED', ...reply(status) };
   }
   return { kind: 'UNRECOGNIZED', ...reply(status) };
 }

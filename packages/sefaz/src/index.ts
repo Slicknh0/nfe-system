@@ -15,18 +15,23 @@ export type {
   AuthorizationResult,
   EnvironmentCode,
   InvoiceProtocol,
+  NumberVoidRequest,
+  NumberVoidResult,
   ProtocolQueryRequest,
   ProtocolQueryResult,
   SefazProvider,
   StatusReply,
+  VoidProtocol,
 } from './provider.js';
 
 export {
   SefazStatus,
   classifyProtocolStatus,
   interpretAuthorizationResponse,
+  interpretNumberVoidResponse,
   interpretProtocolQueryResponse,
   type AuthorizationResponse,
+  type NumberVoidResponse,
   type ProtocolQueryResponse,
   type ProtocolStatusClass,
 } from './status-codes.js';
@@ -38,6 +43,7 @@ export {
   type MockQueryBehavior,
   type MockSefazCall,
   type MockSefazOptions,
+  type MockVoidBehavior,
 } from './mock-provider.js';
 
 export {

@@ -8,8 +8,14 @@
  */
 
 import { randomInt } from 'node:crypto';
-import { InvalidTransitionError, NfeStatus, buildUnsignedNfe } from '@nfe/core';
-import type { InvoiceProtocol } from '@nfe/sefaz';
+import {
+  InvalidTransitionError,
+  NfeStatus,
+  buildUnsignedInutilization,
+  buildUnsignedNfe,
+  parseAccessKey,
+} from '@nfe/core';
+import type { InvoiceProtocol, VoidProtocol } from '@nfe/sefaz';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   ConcurrentModificationError,
@@ -21,6 +27,7 @@ import {
   type DraftDocument,
   type InvoiceRecord,
   type EmissionStore,
+  type NumberVoidDraft,
   type SignedArtifact,
   type SigningContext,
 } from '../../src/index.js';
@@ -419,6 +426,207 @@ export function describeEmissionStoreContract(
         expect(
           await store().findUnfinishedAttempts({ ...scope, startedBefore: new Date(Date.now() + 60_000) }),
         ).toEqual([]);
+      });
+    });
+
+    async function sendToPending(invoice: InvoiceRecord): Promise<InvoiceRecord> {
+      const { attemptId } = await store().beginAttempt({
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        operation: 'AUTHORIZATION',
+        path: [NfeStatus.Queued, NfeStatus.Sending],
+      });
+      return store().finishAttempt({
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        attemptId,
+        path: [NfeStatus.Sending, NfeStatus.CommunicationError, NfeStatus.PendingReconciliation],
+        outcome: 'NO_RESPONSE',
+      });
+    }
+
+    function voidDraftFor(
+      invoice: InvoiceRecord,
+      justification = 'Numeracao nao utilizada por falha tecnica',
+    ): NumberVoidDraft {
+      const key = parseAccessKey(invoice.accessKey!);
+      const unsigned = buildUnsignedInutilization({
+        environment: invoice.environment,
+        stateCode: key.cUF,
+        year: key.year,
+        cnpj: key.cnpj,
+        series: key.series,
+        firstNumber: key.number,
+        lastNumber: key.number,
+        justification,
+      });
+      return { year: key.year, justification, requestId: unsigned.id, signedXml: unsigned.xml };
+    }
+
+    const voidProtocol = (statusCode: number): VoidProtocol => ({
+      statusCode,
+      statusReason: statusCode === 102 ? 'Inutilização de número homologado' : 'Rejeição: repetido',
+      protocolNumber: '135260000000077',
+      receivedAt: new Date('2026-09-12T15:30:00.000Z'),
+    });
+
+    describe('consultas de apoio à reconciliação', () => {
+      it('lista as tentativas do documento em ordem, com desfecho e código', async () => {
+        const invoice = await sendToPending(await sign(await createInvoice()));
+        const { attemptId } = await store().beginAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          operation: 'PROTOCOL_QUERY',
+          path: [NfeStatus.PendingReconciliation],
+        });
+        await store().finishAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          attemptId,
+          path: [NfeStatus.PendingReconciliation],
+          outcome: 'NOT_FOUND',
+          lastStatus: { statusCode: 217, statusReason: 'Rejeição: NF-e não consta na base de dados da SEFAZ' },
+        });
+
+        const attempts = await store().findAttempts(invoice.tenantId, invoice.id);
+        expect(attempts.map((attempt) => [attempt.operation, attempt.outcome, attempt.statusCode])).toEqual([
+          ['AUTHORIZATION', 'NO_RESPONSE', undefined],
+          ['PROTOCOL_QUERY', 'NOT_FOUND', 217],
+        ]);
+        expect(attempts.every((attempt) => attempt.finishedAt instanceof Date)).toBe(true);
+        expect(await store().findAttempts(context.tenantB.tenantId, invoice.id)).toEqual([]);
+      });
+
+      it('lista documentos por estado, apenas do tenant e respeitando o limite', async () => {
+        const first = await sendToPending(await sign(await createInvoice()));
+        const second = await sendToPending(await sign(await createInvoice()));
+        await createInvoice();
+        await sendToPending(await sign(await createInvoice(context.tenantB)));
+
+        const query = { tenantId: context.tenantA.tenantId, statuses: [NfeStatus.PendingReconciliation] };
+        const pending = await store().listInvoices({ ...query, limit: 10 });
+        expect(pending.map((invoice) => invoice.id).sort()).toEqual([first.id, second.id].sort());
+        expect(await store().listInvoices({ ...query, limit: 1 })).toHaveLength(1);
+      });
+    });
+
+    describe('inutilização de numeração', () => {
+      it('registra o pedido e, homologado, encerra o documento com o protocolo', async () => {
+        const invoice = await sendToPending(await sign(await createInvoice()));
+        const draft = voidDraftFor(invoice);
+        const { attemptId } = await store().beginAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          operation: 'NUMBER_VOID',
+          path: [NfeStatus.PendingReconciliation],
+          numberVoid: draft,
+        });
+
+        const requested = await store().findNumberVoid(invoice.tenantId, invoice.id);
+        expect(requested).toMatchObject({
+          status: 'REQUESTED',
+          requestId: draft.requestId,
+          series: invoice.series,
+          firstNumber: invoice.number,
+          lastNumber: invoice.number,
+          year: draft.year,
+        });
+
+        const protocol = voidProtocol(102);
+        const voided = await store().finishAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          attemptId,
+          path: [NfeStatus.PendingReconciliation, NfeStatus.NumberVoided],
+          outcome: 'VOIDED',
+          lastStatus: { statusCode: 102, statusReason: protocol.statusReason },
+          numberVoid: { status: 'VOIDED', protocol },
+        });
+
+        expect(voided.status).toBe(NfeStatus.NumberVoided);
+        const record = await store().findNumberVoid(invoice.tenantId, invoice.id);
+        expect(record?.status).toBe('VOIDED');
+        expect(record?.protocol).toEqual(protocol);
+        expect(await store().findNumberVoid(context.tenantB.tenantId, invoice.id)).toBeUndefined();
+
+        await expect(
+          store().transition({
+            tenantId: invoice.tenantId,
+            invoiceId: invoice.id,
+            path: [NfeStatus.NumberVoided, NfeStatus.Draft],
+          }),
+        ).rejects.toBeInstanceOf(InvalidTransitionError);
+      });
+
+      it('pedido sem resposta pode ser repetido e o registro é o mesmo', async () => {
+        const invoice = await sendToPending(await sign(await createInvoice()));
+        const first = await store().beginAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          operation: 'NUMBER_VOID',
+          path: [NfeStatus.PendingReconciliation],
+          numberVoid: voidDraftFor(invoice),
+        });
+        await store().finishAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          attemptId: first.attemptId,
+          path: [NfeStatus.PendingReconciliation],
+          outcome: 'NO_RESPONSE',
+          numberVoid: { status: 'REQUESTED' },
+        });
+
+        const retry = await store().beginAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          operation: 'NUMBER_VOID',
+          path: [NfeStatus.PendingReconciliation],
+          numberVoid: voidDraftFor(invoice, 'Segunda tentativa de inutilizacao do numero'),
+        });
+        expect((await store().findNumberVoid(invoice.tenantId, invoice.id))?.justification).toBe(
+          'Segunda tentativa de inutilizacao do numero',
+        );
+
+        await store().finishAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          attemptId: retry.attemptId,
+          path: [NfeStatus.PendingReconciliation, NfeStatus.NumberVoided],
+          outcome: 'VOIDED',
+          lastStatus: { statusCode: 563, statusReason: 'Rejeição: repetido' },
+          numberVoid: { status: 'VOIDED', protocol: voidProtocol(563) },
+        });
+        const record = await store().findNumberVoid(invoice.tenantId, invoice.id);
+        expect(record).toMatchObject({ status: 'VOIDED', lastStatus: { statusCode: 563 } });
+      });
+
+      it('numeração já inutilizada não recebe novo pedido', async () => {
+        const invoice = await sendToPending(await sign(await createInvoice()));
+        const { attemptId } = await store().beginAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          operation: 'NUMBER_VOID',
+          path: [NfeStatus.PendingReconciliation],
+          numberVoid: voidDraftFor(invoice),
+        });
+        await store().finishAttempt({
+          tenantId: invoice.tenantId,
+          invoiceId: invoice.id,
+          attemptId,
+          path: [NfeStatus.PendingReconciliation, NfeStatus.NumberVoided],
+          outcome: 'VOIDED',
+          numberVoid: { status: 'VOIDED', protocol: voidProtocol(102) },
+        });
+
+        await expect(
+          store().beginAttempt({
+            tenantId: invoice.tenantId,
+            invoiceId: invoice.id,
+            operation: 'NUMBER_VOID',
+            path: [NfeStatus.NumberVoided],
+            numberVoid: voidDraftFor(invoice),
+          }),
+        ).rejects.toBeInstanceOf(ConcurrentModificationError);
       });
     });
 

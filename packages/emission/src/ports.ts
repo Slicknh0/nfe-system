@@ -13,6 +13,7 @@ import type {
   InvoiceProtocol,
   SefazOperation,
   StatusReply,
+  VoidProtocol,
 } from '@nfe/sefaz';
 
 /** Campos atribuídos no momento da emissão, nunca informados pelo usuário. */
@@ -108,12 +109,46 @@ export type AttemptOutcome =
   | 'NOT_FOUND'
   | 'QUERY_REJECTED'
   | 'PROTOCOL_MISMATCH'
+  | 'VOIDED'
+  | 'RANGE_ALREADY_VOIDED'
+  | 'NUMBER_ALREADY_USED'
   | 'NOT_SENT'
   | 'NO_RESPONSE'
   | 'ABANDONED';
 
+/** Situação do pedido de inutilização vinculado a um documento. */
+export type NumberVoidStatus = 'REQUESTED' | 'VOIDED' | 'REJECTED';
+
+/** Pedido de inutilização montado e assinado, prestes a ser enviado. */
+export interface NumberVoidDraft {
+  readonly year: number;
+  readonly justification: string;
+  /** Atributo `Id` de `infInut`. */
+  readonly requestId: string;
+  readonly signedXml: string;
+}
+
+export interface NumberVoidRecord extends NumberVoidDraft {
+  readonly invoiceId: string;
+  readonly series: number;
+  readonly firstNumber: number;
+  readonly lastNumber: number;
+  readonly status: NumberVoidStatus;
+  readonly protocol?: VoidProtocol;
+  readonly lastStatus?: StatusReply;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+}
+
+export interface NumberVoidUpdate {
+  readonly status: NumberVoidStatus;
+  readonly protocol?: VoidProtocol;
+}
+
 export interface AttemptRequest extends TransitionRequest {
   readonly operation: SefazOperation;
+  /** Obrigatório quando `operation` é `NUMBER_VOID`; proibido nas demais. */
+  readonly numberVoid?: NumberVoidDraft;
 }
 
 export interface AttemptStart {
@@ -125,6 +160,8 @@ export interface AttemptCompletion extends TransitionRequest {
   readonly attemptId: string;
   readonly outcome: AttemptOutcome;
   readonly protocol?: InvoiceProtocol;
+  /** Situação do pedido de inutilização, quando a tentativa for de inutilização. */
+  readonly numberVoid?: NumberVoidUpdate;
 }
 
 export interface UnfinishedAttempt {
@@ -139,6 +176,21 @@ export interface UnfinishedAttemptQuery {
   readonly startedBefore: Date;
 }
 
+export interface AttemptSummary {
+  readonly attemptId: string;
+  readonly operation: SefazOperation;
+  readonly startedAt: Date;
+  readonly finishedAt?: Date;
+  readonly outcome?: AttemptOutcome;
+  readonly statusCode?: number;
+}
+
+export interface InvoiceListQuery {
+  readonly tenantId: string;
+  readonly statuses: readonly NfeStatus[];
+  readonly limit: number;
+}
+
 export interface EmissionStore {
   /** Idempotente por `(tenantId, idempotencyKey)`. Conteúdo diferente com a mesma chave é conflito. */
   createDraft(input: NewDraft): Promise<DraftCreation>;
@@ -146,6 +198,14 @@ export interface EmissionStore {
   findInvoice(tenantId: string, invoiceId: string): Promise<InvoiceRecord | undefined>;
 
   findHistory(tenantId: string, invoiceId: string): Promise<readonly StatusHistoryEntry[]>;
+
+  /** Tentativas de comunicação do documento, da mais antiga para a mais recente. */
+  findAttempts(tenantId: string, invoiceId: string): Promise<readonly AttemptSummary[]>;
+
+  findNumberVoid(tenantId: string, invoiceId: string): Promise<NumberVoidRecord | undefined>;
+
+  /** Documentos nos estados pedidos, dos atualizados há mais tempo para os mais recentes. */
+  listInvoices(query: InvoiceListQuery): Promise<readonly InvoiceRecord[]>;
 
   /** Substitui o conteúdo do rascunho. Série e ambiente não mudam depois de numerado. */
   reviseDraft(input: DraftRevision): Promise<InvoiceRecord>;
@@ -168,6 +228,9 @@ export interface EmissionStore {
    * Registra o início de uma chamada à SEFAZ e aplica o caminho de estados,
    * antes de a chamada acontecer. Se o processo cair durante a chamada, a
    * tentativa fica aberta e é encontrada pela recuperação.
+   *
+   * Com `numberVoid`, grava (ou regrava, se ainda não homologado) o pedido de
+   * inutilização do número do documento.
    */
   beginAttempt(input: AttemptRequest): Promise<AttemptStart>;
 
@@ -181,11 +244,15 @@ export interface Clock {
   now(): Date;
 }
 
+/** Documento que a aplicação assina e valida contra o XSD. */
+export type SignableDocument = 'NFE' | 'INUTILIZATION';
+
 export interface SigningRequest {
   readonly tenantId: string;
   readonly issuerId: string;
+  readonly document: SignableDocument;
   readonly unsignedXml: string;
-  /** Instante da emissão, usado também para conferir a validade do certificado. */
+  /** Instante da operação, usado também para conferir a validade do certificado. */
   readonly now: Date;
 }
 
@@ -205,5 +272,8 @@ export interface SchemaProblem {
 }
 
 export interface SchemaValidator {
-  validate(xml: string): { readonly valid: boolean; readonly errors: readonly SchemaProblem[] };
+  validate(
+    xml: string,
+    document: SignableDocument,
+  ): { readonly valid: boolean; readonly errors: readonly SchemaProblem[] };
 }

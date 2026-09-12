@@ -4,7 +4,14 @@
  * de defeito na aplicação ou de alguém executando SQL à mão.
  */
 
-import { NfeStatus, buildUnsignedNfe, calculateCnpjCheckDigits, canTransition } from '@nfe/core';
+import {
+  NfeStatus,
+  buildUnsignedInutilization,
+  buildUnsignedNfe,
+  calculateCnpjCheckDigits,
+  canTransition,
+  parseAccessKey,
+} from '@nfe/core';
 import { completeDraft, draftRequestHash } from '@nfe/emission';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -265,6 +272,95 @@ describe('número e conteúdo transmitido', () => {
         () => Promise.resolve({ accessKey: invoice.accessKey!, signedXml: `${invoice.signedXml!} ` }),
       ),
     ).rejects.toBeInstanceOf(PersistenceInvariantError);
+  });
+});
+
+async function voidedInvoice() {
+  const queued = await queuedInvoice();
+  const { invoice } = await sendToPending(tenantA, queued.id);
+  const key = parseAccessKey(invoice.accessKey!);
+  const justification = 'Numeracao nao utilizada por falha tecnica';
+  const unsigned = buildUnsignedInutilization({
+    environment: invoice.environment,
+    stateCode: key.cUF,
+    year: key.year,
+    cnpj: key.cnpj,
+    series: key.series,
+    firstNumber: key.number,
+    lastNumber: key.number,
+    justification,
+  });
+  const { attemptId } = await store.beginAttempt({
+    tenantId: tenantA.tenantId,
+    invoiceId: invoice.id,
+    operation: 'NUMBER_VOID',
+    path: [NfeStatus.PendingReconciliation],
+    numberVoid: { year: key.year, justification, requestId: unsigned.id, signedXml: unsigned.xml },
+  });
+  return store.finishAttempt({
+    tenantId: tenantA.tenantId,
+    invoiceId: invoice.id,
+    attemptId,
+    path: [NfeStatus.PendingReconciliation, NfeStatus.NumberVoided],
+    outcome: 'VOIDED',
+    numberVoid: {
+      status: 'VOIDED',
+      protocol: {
+        statusCode: 102,
+        statusReason: 'Inutilização de número homologado',
+        protocolNumber: '135260000000042',
+        receivedAt: new Date(),
+      },
+    },
+  });
+}
+
+describe('numeração inutilizada', () => {
+  it('documento inutilizado é terminal e imutável', async () => {
+    const invoice = await voidedInvoice();
+    expect(
+      await sqlState(asTenant(tenantA.tenantId, "UPDATE invoices SET status = 'DRAFT' WHERE id = $1", [invoice.id])),
+    ).toBe('NFE02');
+    expect(
+      await sqlState(
+        asTenant(tenantA.tenantId, "UPDATE invoices SET signed_xml = signed_xml || ' ' WHERE id = $1", [invoice.id]),
+      ),
+    ).toBe('NFE02');
+  });
+
+  it('inutilização homologada não é alterada nem excluída', async () => {
+    const invoice = await voidedInvoice();
+    expect(
+      await sqlState(
+        asTenant(
+          tenantA.tenantId,
+          "UPDATE number_voids SET justification = justification || ' alterada' WHERE invoice_id = $1",
+          [invoice.id],
+        ),
+      ),
+    ).toBe('NFE07');
+    expect(
+      await sqlState(asTenant(tenantA.tenantId, 'DELETE FROM number_voids WHERE invoice_id = $1', [invoice.id])),
+    ).toBe('42501');
+    expect(await sqlState(database.admin.query('DELETE FROM number_voids WHERE invoice_id = $1', [invoice.id]))).toBe(
+      'NFE07',
+    );
+  });
+
+  it('documento sem número não pode ser marcado como inutilizado', async () => {
+    const invoice = await draftInvoice();
+    expect(
+      await sqlState(
+        asTenant(tenantA.tenantId, "UPDATE invoices SET status = 'NUMBER_VOIDED' WHERE id = $1", [invoice.id]),
+      ),
+    ).toBe('23514');
+  });
+
+  it('pedido de inutilização é isolado por tenant', async () => {
+    const invoice = await voidedInvoice();
+    const count = 'SELECT count(*)::int AS total FROM number_voids WHERE invoice_id = $1';
+    expect((await asTenant(tenantA.tenantId, count, [invoice.id])).rows[0]).toEqual({ total: 1 });
+    expect((await asTenant(tenantB.tenantId, count, [invoice.id])).rows[0]).toEqual({ total: 0 });
   });
 });
 

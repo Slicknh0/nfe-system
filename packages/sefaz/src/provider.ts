@@ -68,9 +68,42 @@ export type ProtocolQueryResult =
   | ({ readonly kind: 'QUERY_REJECTED' } & StatusReply)
   | ({ readonly kind: 'UNRECOGNIZED' } & StatusReply);
 
+/** Pedido de inutilização de numeração (`nfeInutilizacao`). */
+export interface NumberVoidRequest {
+  readonly environment: EnvironmentCode;
+  readonly cnpj: string;
+  readonly series: number;
+  readonly firstNumber: number;
+  readonly lastNumber: number;
+  /** Pedido `inutNFe` assinado. */
+  readonly signedXml: string;
+}
+
+/** Protocolo de homologação da inutilização — `retInutNFe/infInut`. */
+export interface VoidProtocol {
+  readonly statusCode: number;
+  readonly statusReason: string;
+  /** `nProt` — tipo `TProt`. */
+  readonly protocolNumber: string;
+  /** `dhRecbto` */
+  readonly receivedAt: Date;
+}
+
+export type NumberVoidResult =
+  /** 102; ou 563 com o `nProt` do pedido idêntico já homologado (NT 2015.002). */
+  | { readonly kind: 'VOIDED'; readonly protocol: VoidProtocol }
+  /** 256: algum número da faixa já está inutilizado em outro pedido. */
+  | ({ readonly kind: 'RANGE_ALREADY_VOIDED' } & StatusReply)
+  /** 241: algum número da faixa já foi usado por NF-e — a consulta decide o documento. */
+  | ({ readonly kind: 'NUMBER_ALREADY_USED' } & StatusReply)
+  | ({ readonly kind: 'REJECTED' } & StatusReply)
+  | ({ readonly kind: 'SERVICE_UNAVAILABLE' } & StatusReply)
+  | ({ readonly kind: 'UNRECOGNIZED' } & StatusReply);
+
 export interface SefazProvider {
   /** Identificação para log e auditoria. */
   readonly name: string;
   authorize(request: AuthorizationRequest): Promise<AuthorizationResult>;
   queryProtocol(request: ProtocolQueryRequest): Promise<ProtocolQueryResult>;
+  voidNumbers(request: NumberVoidRequest): Promise<NumberVoidResult>;
 }

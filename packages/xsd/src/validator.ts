@@ -115,6 +115,7 @@ function ensureProviderRegistered(): void {
 interface LoadedValidator {
   readonly validator: XsdValidator;
   readonly schemaDoc: XmlDocumentType;
+  readonly packageId: string;
 }
 
 /**
@@ -132,7 +133,8 @@ export class NfeSchemaValidator {
   }
 
   private load(schemaPackage: SchemaPackage): LoadedValidator {
-    const cached = this.cache.get(schemaPackage.id);
+    const cacheKey = `${schemaPackage.id}/${schemaPackage.rootSchema}`;
+    const cached = this.cache.get(cacheKey);
     if (cached !== undefined) {
       return cached;
     }
@@ -148,15 +150,17 @@ export class NfeSchemaValidator {
     schemaDirectoriesByPackage.set(schemaPackage.id, directory);
     ensureProviderRegistered();
 
-    const rootPath = resolve(directory, schemaPackage.rootSchema);
     // A URL carimba o pacote, para que os includes relativos resolvam dentro dele.
-    const schemaDoc = XmlDocument.fromBuffer(readFileSync(rootPath), {
-      url: `${schemaPackage.id}/${schemaPackage.rootSchema}`,
-    });
+    const url = cacheKey;
+    const rootContent =
+      schemaPackage.syntheticRoot === undefined
+        ? readFileSync(resolve(directory, schemaPackage.rootSchema))
+        : Buffer.from(schemaPackage.syntheticRoot, 'utf8');
+    const schemaDoc = XmlDocument.fromBuffer(rootContent, { url });
     const validator = XsdValidator.fromDoc(schemaDoc);
 
-    const loaded: LoadedValidator = { validator, schemaDoc };
-    this.cache.set(schemaPackage.id, loaded);
+    const loaded: LoadedValidator = { validator, schemaDoc, packageId: schemaPackage.id };
+    this.cache.set(cacheKey, loaded);
     return loaded;
   }
 
@@ -204,7 +208,7 @@ export class NfeSchemaValidator {
   }
 
   dispose(): void {
-    for (const [packageId, { validator, schemaDoc }] of this.cache.entries()) {
+    for (const { validator, schemaDoc, packageId } of this.cache.values()) {
       validator.dispose();
       schemaDoc.dispose();
       schemaDirectoriesByPackage.delete(packageId);

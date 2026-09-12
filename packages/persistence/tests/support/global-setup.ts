@@ -92,6 +92,13 @@ export default async function setup({ provide }: GlobalSetupContext): Promise<()
 
   return async () => {
     await server.stop();
-    rmSync(databaseDir, { recursive: true, force: true });
+    // No Windows o processo do Postgres pode ainda segurar arquivos logo após o
+    // stop (EBUSY). A limpeza tenta de novo e, se não conseguir, só avisa: um
+    // diretório temporário esquecido não invalida testes que passaram.
+    try {
+      rmSync(databaseDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (error) {
+      console.warn(`Diretório temporário do Postgres não removido: ${databaseDir}`, error);
+    }
   };
 }

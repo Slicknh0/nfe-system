@@ -99,6 +99,16 @@ export {
 } from './nfe/xml/build-nfe-xml.js';
 
 export {
+  INUTILIZATION_SERVICE,
+  InvalidInutilizationRequestError,
+  MAX_NUMBERS_PER_INUTILIZATION,
+  buildUnsignedInutilization,
+  inutilizationYear,
+  type InutilizationRequest,
+  type UnsignedInutilization,
+} from './nfe/xml/build-inutilization-xml.js';
+
+export {
   InvalidTransitionError,
   NfeStatus,
   assertTransition,

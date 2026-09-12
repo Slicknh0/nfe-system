@@ -3,8 +3,10 @@ import {
   InvalidTransitionError,
   NfeStatus,
   assertTransition,
+  canReachTransmissionWithoutResolution,
   canTransition,
   isEditable,
+  isResolved,
   isTerminal,
   reachableFrom,
 } from '../src/nfe/state-machine.js';
@@ -111,6 +113,39 @@ describe('estados terminais', () => {
 
   it('autorizada não é terminal — ainda admite cancelamento', () => {
     expect(isTerminal(NfeStatus.Authorized)).toBe(false);
+  });
+});
+
+describe('inutilização encerra a numeração', () => {
+  it('pendência, rejeição e rascunho reaberto podem ter o número inutilizado', () => {
+    for (const from of [
+      NfeStatus.PendingReconciliation,
+      NfeStatus.Rejected,
+      NfeStatus.LocalValidationError,
+      NfeStatus.Draft,
+    ]) {
+      expect(canTransition(from, NfeStatus.NumberVoided)).toBe(true);
+    }
+  });
+
+  it('documento autorizado, denegado ou em transmissão não tem o número inutilizado', () => {
+    for (const from of [
+      NfeStatus.Authorized,
+      NfeStatus.Denied,
+      NfeStatus.Cancelled,
+      NfeStatus.Queued,
+      NfeStatus.Sending,
+      NfeStatus.Processing,
+      NfeStatus.CommunicationError,
+    ]) {
+      expect(canTransition(from, NfeStatus.NumberVoided)).toBe(false);
+    }
+  });
+
+  it('numeração inutilizada é desfecho definitivo e não abre caminho de retransmissão', () => {
+    expect(isTerminal(NfeStatus.NumberVoided)).toBe(true);
+    expect(isResolved(NfeStatus.NumberVoided)).toBe(true);
+    expect(canReachTransmissionWithoutResolution(NfeStatus.PendingReconciliation)).toBe(false);
   });
 });
 

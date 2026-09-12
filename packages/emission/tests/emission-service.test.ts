@@ -27,7 +27,7 @@ import {
   type SchemaValidator,
   type XmlSigner,
 } from '../src/index.js';
-import { makeDraft, testSigner, withIdentification } from './support/fixtures.js';
+import { makeDraft, schemaValidatorFor, testSigner, withIdentification } from './support/fixtures.js';
 import { InMemoryEmissionStore } from './support/in-memory-store.js';
 
 const repositoryRoot = fileURLToPath(new URL('../../..', import.meta.url));
@@ -55,7 +55,7 @@ function setup(options: SetupOptions = {}) {
     store,
     sefaz: options.sefaz ?? mock,
     signer: options.signer ?? signer,
-    schemaValidator: options.schemaValidator ?? validator,
+    schemaValidator: options.schemaValidator ?? schemaValidatorFor(validator),
   });
   let sequence = 0;
 
@@ -87,6 +87,7 @@ function stubProvider(result: AuthorizationResult | Error): SefazProvider {
     name: 'stub',
     authorize: () => (result instanceof Error ? Promise.reject(result) : Promise.resolve(result)),
     queryProtocol: () => Promise.reject(new Error('consulta não roteirizada')),
+    voidNumbers: () => Promise.reject(new Error('inutilização não roteirizada')),
   };
 }
 

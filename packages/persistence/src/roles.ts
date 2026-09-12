@@ -14,7 +14,7 @@ export async function grantApplicationAccess(pool: Pool, role: string): Promise<
   await pool.query(`
     GRANT USAGE ON SCHEMA public TO ${grantee};
     GRANT SELECT, INSERT ON tenants, issuers, invoice_status_history TO ${grantee};
-    GRANT SELECT, INSERT, UPDATE ON number_sequences, invoices, sefaz_attempts TO ${grantee};
+    GRANT SELECT, INSERT, UPDATE ON number_sequences, invoices, sefaz_attempts, number_voids TO ${grantee};
   `);
 }
 

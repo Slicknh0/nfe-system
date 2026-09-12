@@ -34,6 +34,8 @@ export enum NfeStatus {
   Contingency = 'CONTINGENCY',
   Denied = 'DENIED',
   Cancelled = 'CANCELLED',
+  /** Numeração inutilizada na SEFAZ: nenhuma NF-e existirá com este número. */
+  NumberVoided = 'NUMBER_VOIDED',
 }
 
 export class InvalidTransitionError extends FiscalError {
@@ -46,7 +48,9 @@ export class InvalidTransitionError extends FiscalError {
 }
 
 const TRANSITIONS: Readonly<Record<NfeStatus, readonly NfeStatus[]>> = Object.freeze({
-  [NfeStatus.Draft]: [NfeStatus.Validating],
+  // Inutilização a partir do rascunho só faz sentido para documento já numerado
+  // (reaberto após rejeição); a aplicação e o banco exigem o número.
+  [NfeStatus.Draft]: [NfeStatus.Validating, NfeStatus.NumberVoided],
 
   [NfeStatus.Validating]: [NfeStatus.Validated, NfeStatus.LocalValidationError],
 
@@ -91,6 +95,10 @@ const TRANSITIONS: Readonly<Record<NfeStatus, readonly NfeStatus[]>> = Object.fr
     NfeStatus.Authorized,
     NfeStatus.Rejected,
     NfeStatus.Denied,
+    // Pendente de retorno não localizada pela consulta: a numeração é
+    // inutilizada (MOC 7.0, Anexo III, 2.3.3). Se a nota tiver sido usada, a
+    // SEFAZ recusa a inutilização (241) e a consulta volta a decidir.
+    NfeStatus.NumberVoided,
   ],
 
   [NfeStatus.Contingency]: [
@@ -101,9 +109,9 @@ const TRANSITIONS: Readonly<Record<NfeStatus, readonly NfeStatus[]>> = Object.fr
   ],
 
   // Rejeição é resposta de negócio: o contribuinte corrige e reemite.
-  [NfeStatus.Rejected]: [NfeStatus.Draft],
+  [NfeStatus.Rejected]: [NfeStatus.Draft, NfeStatus.NumberVoided],
 
-  [NfeStatus.LocalValidationError]: [NfeStatus.Draft],
+  [NfeStatus.LocalValidationError]: [NfeStatus.Draft, NfeStatus.NumberVoided],
 
   // Documento oficial. Única saída é o evento de cancelamento confirmado.
   [NfeStatus.Authorized]: [NfeStatus.Cancelled],
@@ -111,6 +119,8 @@ const TRANSITIONS: Readonly<Record<NfeStatus, readonly NfeStatus[]>> = Object.fr
   [NfeStatus.Denied]: [],
 
   [NfeStatus.Cancelled]: [],
+
+  [NfeStatus.NumberVoided]: [],
 });
 
 /** Estados em que o documento ainda admite edição de conteúdo fiscal. */
@@ -153,6 +163,7 @@ const RESOLVED = new Set<NfeStatus>([
   NfeStatus.Rejected,
   NfeStatus.Denied,
   NfeStatus.Cancelled,
+  NfeStatus.NumberVoided,
 ]);
 
 /** Estados que representam o documento em transmissão. */

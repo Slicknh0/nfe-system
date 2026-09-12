@@ -8,6 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { NfeStatus } from '@nfe/core';
+import type { SefazOperation } from '@nfe/sefaz';
 import {
   ConcurrentModificationError,
   IdempotencyConflictError,
@@ -20,11 +21,14 @@ import {
   type AttemptOutcome,
   type AttemptRequest,
   type AttemptStart,
+  type AttemptSummary,
   type DraftCreation,
   type DraftRevision,
   type EmissionStore,
+  type InvoiceListQuery,
   type InvoiceRecord,
   type NewDraft,
+  type NumberVoidRecord,
   type SignedArtifact,
   type SigningContext,
   type StatusHistoryEntry,
@@ -32,7 +36,6 @@ import {
   type UnfinishedAttempt,
   type UnfinishedAttemptQuery,
 } from '../../src/index.js';
-import type { SefazOperation } from '@nfe/sefaz';
 import { KeyedMutex } from './keyed-mutex.js';
 
 interface AttemptRow {
@@ -41,7 +44,9 @@ interface AttemptRow {
   readonly invoiceId: string;
   readonly operation: SefazOperation;
   readonly startedAt: Date;
+  readonly finishedAt?: Date;
   readonly outcome?: AttemptOutcome;
+  readonly statusCode?: number;
 }
 
 type InvoiceChanges = Partial<
@@ -56,6 +61,7 @@ export class InMemoryEmissionStore implements EmissionStore {
   private readonly histories = new Map<string, StatusHistoryEntry[]>();
   private readonly sequences = new Map<string, number>();
   private readonly attempts = new Map<string, AttemptRow>();
+  private readonly numberVoids = new Map<string, NumberVoidRecord>();
   private readonly mutex = new KeyedMutex();
   private readonly now: () => Date;
 
@@ -98,14 +104,47 @@ export class InMemoryEmissionStore implements EmissionStore {
   }
 
   findInvoice(tenantId: string, invoiceId: string): Promise<InvoiceRecord | undefined> {
-    const invoice = this.invoices.get(invoiceId);
-    return Promise.resolve(invoice?.tenantId === tenantId ? invoice : undefined);
+    return Promise.resolve(this.visible(tenantId, invoiceId));
   }
 
   findHistory(tenantId: string, invoiceId: string): Promise<readonly StatusHistoryEntry[]> {
-    const invoice = this.invoices.get(invoiceId);
     return Promise.resolve(
-      invoice?.tenantId === tenantId ? [...(this.histories.get(invoiceId) ?? [])] : [],
+      this.visible(tenantId, invoiceId) === undefined ? [] : [...(this.histories.get(invoiceId) ?? [])],
+    );
+  }
+
+  findAttempts(tenantId: string, invoiceId: string): Promise<readonly AttemptSummary[]> {
+    if (this.visible(tenantId, invoiceId) === undefined) {
+      return Promise.resolve([]);
+    }
+    return Promise.resolve(
+      [...this.attempts.values()]
+        .filter((attempt) => attempt.invoiceId === invoiceId)
+        .sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime())
+        .map((attempt) => ({
+          attemptId: attempt.id,
+          operation: attempt.operation,
+          startedAt: attempt.startedAt,
+          ...(attempt.finishedAt === undefined ? {} : { finishedAt: attempt.finishedAt }),
+          ...(attempt.outcome === undefined ? {} : { outcome: attempt.outcome }),
+          ...(attempt.statusCode === undefined ? {} : { statusCode: attempt.statusCode }),
+        })),
+    );
+  }
+
+  findNumberVoid(tenantId: string, invoiceId: string): Promise<NumberVoidRecord | undefined> {
+    return Promise.resolve(
+      this.visible(tenantId, invoiceId) === undefined ? undefined : this.numberVoids.get(invoiceId),
+    );
+  }
+
+  listInvoices(query: InvoiceListQuery): Promise<readonly InvoiceRecord[]> {
+    const statuses = new Set(query.statuses);
+    return Promise.resolve(
+      [...this.invoices.values()]
+        .filter((invoice) => invoice.tenantId === query.tenantId && statuses.has(invoice.status))
+        .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+        .slice(0, query.limit),
     );
   }
 
@@ -173,15 +212,43 @@ export class InMemoryEmissionStore implements EmissionStore {
   beginAttempt(input: AttemptRequest): Promise<AttemptStart> {
     return this.mutex.run(input.invoiceId, () => {
       assertStatusPath(input.path);
-      const invoice = this.apply(this.load(input), input, {});
+      const current = this.load(input);
+      if ((input.operation === 'NUMBER_VOID') !== (input.numberVoid !== undefined)) {
+        throw new Error('O pedido de inutilização acompanha exatamente a operação NUMBER_VOID.');
+      }
+      const existingVoid = this.numberVoids.get(input.invoiceId);
+      if (input.numberVoid !== undefined) {
+        if (current.number === undefined) {
+          throw new Error('Documento sem número não tem numeração a inutilizar.');
+        }
+        if (existingVoid?.status === 'VOIDED') {
+          throw new ConcurrentModificationError(input.invoiceId, 'numeração já inutilizada');
+        }
+      }
+
+      const invoice = this.apply(current, input, {});
+      const at = this.now();
       const attemptId = randomUUID();
       this.attempts.set(attemptId, {
         id: attemptId,
         tenantId: input.tenantId,
         invoiceId: input.invoiceId,
         operation: input.operation,
-        startedAt: this.now(),
+        startedAt: at,
       });
+
+      if (input.numberVoid !== undefined && current.number !== undefined) {
+        this.numberVoids.set(input.invoiceId, {
+          ...input.numberVoid,
+          invoiceId: input.invoiceId,
+          series: current.series,
+          firstNumber: current.number,
+          lastNumber: current.number,
+          status: 'REQUESTED',
+          createdAt: existingVoid?.createdAt ?? at,
+          updatedAt: at,
+        });
+      }
       return Promise.resolve({ invoice, attemptId });
     });
   }
@@ -197,12 +264,33 @@ export class InMemoryEmissionStore implements EmissionStore {
       if (attempt.outcome !== undefined) {
         throw new ConcurrentModificationError(input.invoiceId, 'tentativa já concluída');
       }
+      const numberVoid = this.numberVoids.get(input.invoiceId);
+      if (input.numberVoid !== undefined && numberVoid === undefined) {
+        throw new ConcurrentModificationError(input.invoiceId, 'pedido de inutilização inexistente');
+      }
+
       const invoice = this.apply(
         current,
         input,
         input.protocol === undefined ? {} : { protocol: input.protocol },
       );
-      this.attempts.set(attempt.id, { ...attempt, outcome: input.outcome });
+      const at = this.now();
+      this.attempts.set(attempt.id, {
+        ...attempt,
+        finishedAt: at,
+        outcome: input.outcome,
+        ...(input.lastStatus === undefined ? {} : { statusCode: input.lastStatus.statusCode }),
+      });
+
+      if (input.numberVoid !== undefined && numberVoid !== undefined) {
+        this.numberVoids.set(input.invoiceId, {
+          ...numberVoid,
+          status: input.numberVoid.status,
+          ...(input.numberVoid.protocol === undefined ? {} : { protocol: input.numberVoid.protocol }),
+          ...(input.lastStatus === undefined ? {} : { lastStatus: input.lastStatus }),
+          updatedAt: at,
+        });
+      }
       return Promise.resolve(invoice);
     });
   }
@@ -226,9 +314,14 @@ export class InMemoryEmissionStore implements EmissionStore {
     );
   }
 
+  private visible(tenantId: string, invoiceId: string): InvoiceRecord | undefined {
+    const invoice = this.invoices.get(invoiceId);
+    return invoice?.tenantId === tenantId ? invoice : undefined;
+  }
+
   private load(request: TransitionRequest): InvoiceRecord {
-    const invoice = this.invoices.get(request.invoiceId);
-    if (invoice?.tenantId !== request.tenantId) {
+    const invoice = this.visible(request.tenantId, request.invoiceId);
+    if (invoice === undefined) {
       throw new InvoiceNotFoundError(request.invoiceId);
     }
     const expected = request.path[0];

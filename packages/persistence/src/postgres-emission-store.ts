@@ -26,14 +26,19 @@ import {
   decodeDocument,
   encodeDocument,
   type AttemptCompletion,
+  type AttemptOutcome,
   type AttemptRequest,
   type AttemptStart,
+  type AttemptSummary,
   type DraftCreation,
   type DraftDocument,
   type DraftRevision,
   type EmissionStore,
+  type InvoiceListQuery,
   type InvoiceRecord,
   type NewDraft,
+  type NumberVoidRecord,
+  type NumberVoidStatus,
   type SignedArtifact,
   type SigningContext,
   type StatusHistoryEntry,
@@ -42,12 +47,19 @@ import {
   type UnfinishedAttemptQuery,
 } from '@nfe/emission';
 import type { EnvironmentCode, InvoiceProtocol, SefazOperation } from '@nfe/sefaz';
-import { and, asc, eq, isNull, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import { isUuid, withTenant, type Database, type Transaction } from './database.js';
 import { translateDatabaseError } from './errors.js';
-import { invoiceStatusHistory, invoices, numberSequences, sefazAttempts } from './schema.js';
+import {
+  invoiceStatusHistory,
+  invoices,
+  numberSequences,
+  numberVoids,
+  sefazAttempts,
+} from './schema.js';
 
 type InvoiceRow = typeof invoices.$inferSelect;
+type NumberVoidRow = typeof numberVoids.$inferSelect;
 type InvoiceChanges = Partial<
   Pick<
     typeof invoices.$inferInsert,
@@ -66,7 +78,27 @@ type InvoiceChanges = Partial<
 >;
 
 const STATUSES = new Set<string>(Object.values(NfeStatus));
-const OPERATIONS = new Set<string>(['AUTHORIZATION', 'PROTOCOL_QUERY']);
+const OPERATIONS = new Set<string>(['AUTHORIZATION', 'PROTOCOL_QUERY', 'NUMBER_VOID']);
+const OUTCOMES = new Set<string>([
+  'AUTHORIZED',
+  'DENIED',
+  'REJECTED',
+  'DUPLICATE',
+  'IN_PROCESSING',
+  'SERVICE_UNAVAILABLE',
+  'UNRECOGNIZED',
+  'CANCELLED',
+  'NOT_FOUND',
+  'QUERY_REJECTED',
+  'PROTOCOL_MISMATCH',
+  'VOIDED',
+  'RANGE_ALREADY_VOIDED',
+  'NUMBER_ALREADY_USED',
+  'NOT_SENT',
+  'NO_RESPONSE',
+  'ABANDONED',
+]);
+const VOID_STATUSES = new Set<string>(['REQUESTED', 'VOIDED', 'REJECTED']);
 
 export class PostgresEmissionStore implements EmissionStore {
   private readonly db: Database;
@@ -163,6 +195,58 @@ export class PostgresEmissionStore implements EmissionStore {
     }));
   }
 
+  async findAttempts(tenantId: string, invoiceId: string): Promise<readonly AttemptSummary[]> {
+    if (!isUuid(tenantId) || !isUuid(invoiceId)) {
+      return [];
+    }
+    const rows = await this.inTenant(tenantId, (tx) =>
+      tx
+        .select()
+        .from(sefazAttempts)
+        .where(and(eq(sefazAttempts.invoiceId, invoiceId), eq(sefazAttempts.tenantId, tenantId)))
+        .orderBy(asc(sefazAttempts.startedAt), asc(sefazAttempts.id))
+        .then((result) => result),
+    );
+    return rows.map((row) => ({
+      attemptId: row.id,
+      operation: toOperation(row.operation),
+      startedAt: row.startedAt,
+      ...(row.finishedAt === null ? {} : { finishedAt: row.finishedAt }),
+      ...(row.outcome === null ? {} : { outcome: toOutcome(row.outcome) }),
+      ...(row.statusCode === null ? {} : { statusCode: row.statusCode }),
+    }));
+  }
+
+  async findNumberVoid(tenantId: string, invoiceId: string): Promise<NumberVoidRecord | undefined> {
+    if (!isUuid(tenantId) || !isUuid(invoiceId)) {
+      return undefined;
+    }
+    const [row] = await this.inTenant(tenantId, (tx) =>
+      tx
+        .select()
+        .from(numberVoids)
+        .where(and(eq(numberVoids.invoiceId, invoiceId), eq(numberVoids.tenantId, tenantId)))
+        .then((rows) => rows),
+    );
+    return row === undefined ? undefined : toNumberVoidRecord(row);
+  }
+
+  async listInvoices(query: InvoiceListQuery): Promise<readonly InvoiceRecord[]> {
+    if (!isUuid(query.tenantId) || query.statuses.length === 0 || query.limit <= 0) {
+      return [];
+    }
+    const rows = await this.inTenant(query.tenantId, (tx) =>
+      tx
+        .select()
+        .from(invoices)
+        .where(and(eq(invoices.tenantId, query.tenantId), inArray(invoices.status, [...query.statuses])))
+        .orderBy(asc(invoices.updatedAt), asc(invoices.id))
+        .limit(query.limit)
+        .then((result) => result),
+    );
+    return rows.map(toRecord);
+  }
+
   async reviseDraft(input: DraftRevision): Promise<InvoiceRecord> {
     assertStatusPath(input.path);
     return await this.inInvoice(input, async (tx, row) => {
@@ -252,8 +336,14 @@ export class PostgresEmissionStore implements EmissionStore {
 
   async beginAttempt(input: AttemptRequest): Promise<AttemptStart> {
     assertStatusPath(input.path);
+    if ((input.operation === 'NUMBER_VOID') !== (input.numberVoid !== undefined)) {
+      throw new Error('O pedido de inutilização acompanha exatamente a operação NUMBER_VOID.');
+    }
     let attemptId = '';
     const invoice = await this.inInvoice(input, async (tx, row) => {
+      if (input.numberVoid !== undefined) {
+        await upsertNumberVoid(tx, row, input);
+      }
       const updated = await applyPath(tx, row, input, {});
       const [attempt] = await tx
         .insert(sefazAttempts)
@@ -294,6 +384,36 @@ export class PostgresEmissionStore implements EmissionStore {
       if (finished === undefined) {
         throw new ConcurrentModificationError(input.invoiceId, 'tentativa inexistente ou já concluída');
       }
+
+      if (input.numberVoid !== undefined) {
+        const protocol = input.numberVoid.protocol;
+        const [updated] = await tx
+          .update(numberVoids)
+          .set({
+            status: input.numberVoid.status,
+            ...(protocol === undefined
+              ? {}
+              : {
+                  protocolNumber: protocol.protocolNumber,
+                  protocolStatusCode: protocol.statusCode,
+                  protocolStatusReason: protocol.statusReason,
+                  protocolReceivedAt: protocol.receivedAt,
+                }),
+            ...(input.lastStatus === undefined
+              ? {}
+              : {
+                  lastStatusCode: input.lastStatus.statusCode,
+                  lastStatusReason: input.lastStatus.statusReason,
+                }),
+            updatedAt: sql`now()`,
+          })
+          .where(and(eq(numberVoids.invoiceId, row.id), eq(numberVoids.tenantId, row.tenantId)))
+          .returning({ id: numberVoids.id });
+        if (updated === undefined) {
+          throw new ConcurrentModificationError(input.invoiceId, 'pedido de inutilização inexistente');
+        }
+      }
+
       return await applyPath(tx, row, input, protocolChanges(input.protocol));
     });
   }
@@ -360,6 +480,61 @@ export class PostgresEmissionStore implements EmissionStore {
     });
     return toRecord(row);
   }
+}
+
+/** Grava o pedido de inutilização do documento, ou o regrava se ainda não foi homologado. */
+async function upsertNumberVoid(tx: Transaction, row: InvoiceRow, input: AttemptRequest): Promise<void> {
+  const draft = input.numberVoid;
+  if (draft === undefined) {
+    return;
+  }
+  if (row.number === null) {
+    throw new Error('Documento sem número não tem numeração a inutilizar.');
+  }
+
+  const [existing] = await tx
+    .select({ status: numberVoids.status })
+    .from(numberVoids)
+    .where(and(eq(numberVoids.invoiceId, row.id), eq(numberVoids.tenantId, row.tenantId)))
+    .for('update');
+
+  const content = {
+    year: draft.year,
+    justification: draft.justification,
+    requestId: draft.requestId,
+    signedXml: draft.signedXml,
+    status: 'REQUESTED',
+  };
+
+  if (existing === undefined) {
+    await tx.insert(numberVoids).values({
+      ...content,
+      tenantId: row.tenantId,
+      invoiceId: row.id,
+      environment: row.environment,
+      model: row.model,
+      series: row.series,
+      firstNumber: row.number,
+      lastNumber: row.number,
+    });
+    return;
+  }
+  if (existing.status === 'VOIDED') {
+    throw new ConcurrentModificationError(row.id, 'numeração já inutilizada');
+  }
+  await tx
+    .update(numberVoids)
+    .set({
+      ...content,
+      protocolNumber: null,
+      protocolStatusCode: null,
+      protocolStatusReason: null,
+      protocolReceivedAt: null,
+      lastStatusCode: null,
+      lastStatusReason: null,
+      updatedAt: sql`now()`,
+    })
+    .where(and(eq(numberVoids.invoiceId, row.id), eq(numberVoids.tenantId, row.tenantId)));
 }
 
 async function applyPath(
@@ -430,6 +605,20 @@ function toOperation(value: string): SefazOperation {
   return value as SefazOperation;
 }
 
+function toOutcome(value: string): AttemptOutcome {
+  if (!OUTCOMES.has(value)) {
+    throw new Error(`Desfecho desconhecido no banco: ${value}.`);
+  }
+  return value as AttemptOutcome;
+}
+
+function toVoidStatus(value: string): NumberVoidStatus {
+  if (!VOID_STATUSES.has(value)) {
+    throw new Error(`Situação de inutilização desconhecida no banco: ${value}.`);
+  }
+  return value as NumberVoidStatus;
+}
+
 function toEnvironment(value: number): EnvironmentCode {
   if (value !== 1 && value !== 2) {
     throw new Error(`Ambiente desconhecido no banco: ${value}.`);
@@ -480,5 +669,37 @@ function protocolOf(row: InvoiceRow): { protocol?: InvoiceProtocol } {
       receivedAt: row.protocolReceivedAt,
       ...(row.protocolDigestValue === null ? {} : { digestValue: row.protocolDigestValue }),
     },
+  };
+}
+
+function toNumberVoidRecord(row: NumberVoidRow): NumberVoidRecord {
+  return {
+    invoiceId: row.invoiceId,
+    series: row.series,
+    firstNumber: row.firstNumber,
+    lastNumber: row.lastNumber,
+    year: row.year,
+    justification: row.justification,
+    requestId: row.requestId,
+    signedXml: row.signedXml,
+    status: toVoidStatus(row.status),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    ...(row.protocolNumber === null ||
+    row.protocolStatusCode === null ||
+    row.protocolStatusReason === null ||
+    row.protocolReceivedAt === null
+      ? {}
+      : {
+          protocol: {
+            statusCode: row.protocolStatusCode,
+            statusReason: row.protocolStatusReason,
+            protocolNumber: row.protocolNumber,
+            receivedAt: row.protocolReceivedAt,
+          },
+        }),
+    ...(row.lastStatusCode === null || row.lastStatusReason === null
+      ? {}
+      : { lastStatus: { statusCode: row.lastStatusCode, statusReason: row.lastStatusReason } }),
   };
 }
