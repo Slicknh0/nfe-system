@@ -74,6 +74,7 @@ type InvoiceChanges = Partial<
     | 'protocolStatusReason'
     | 'protocolReceivedAt'
     | 'protocolDigestValue'
+    | 'protocolXml'
   >
 >;
 
@@ -398,6 +399,7 @@ export class PostgresEmissionStore implements EmissionStore {
                   protocolStatusCode: protocol.statusCode,
                   protocolStatusReason: protocol.statusReason,
                   protocolReceivedAt: protocol.receivedAt,
+                  responseXml: protocol.xml ?? null,
                 }),
             ...(input.lastStatus === undefined
               ? {}
@@ -530,6 +532,7 @@ async function upsertNumberVoid(tx: Transaction, row: InvoiceRow, input: Attempt
       protocolStatusCode: null,
       protocolStatusReason: null,
       protocolReceivedAt: null,
+      responseXml: null,
       lastStatusCode: null,
       lastStatusReason: null,
       updatedAt: sql`now()`,
@@ -588,6 +591,7 @@ function protocolChanges(protocol: InvoiceProtocol | undefined): InvoiceChanges 
     protocolStatusReason: protocol.statusReason,
     protocolReceivedAt: protocol.receivedAt,
     protocolDigestValue: protocol.digestValue ?? null,
+    protocolXml: protocol.xml ?? null,
   };
 }
 
@@ -668,6 +672,7 @@ function protocolOf(row: InvoiceRow): { protocol?: InvoiceProtocol } {
       protocolNumber: row.protocolNumber,
       receivedAt: row.protocolReceivedAt,
       ...(row.protocolDigestValue === null ? {} : { digestValue: row.protocolDigestValue }),
+      ...(row.protocolXml === null ? {} : { xml: row.protocolXml }),
     },
   };
 }
@@ -696,6 +701,7 @@ function toNumberVoidRecord(row: NumberVoidRow): NumberVoidRecord {
             statusReason: row.protocolStatusReason,
             protocolNumber: row.protocolNumber,
             receivedAt: row.protocolReceivedAt,
+            ...(row.responseXml === null ? {} : { xml: row.responseXml }),
           },
         }),
     ...(row.lastStatusCode === null || row.lastStatusReason === null

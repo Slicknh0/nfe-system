@@ -11,6 +11,7 @@ import type { EncodedValue } from '@nfe/emission';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   char,
   integer,
   jsonb,
@@ -75,6 +76,7 @@ export const invoices = pgTable('invoices', {
   protocolStatusReason: text('protocol_status_reason'),
   protocolReceivedAt: timestamptz('protocol_received_at'),
   protocolDigestValue: text('protocol_digest_value'),
+  protocolXml: text('protocol_xml'),
   lastStatusCode: integer('last_status_code'),
   lastStatusReason: text('last_status_reason'),
   createdAt: timestamptz('created_at').notNull().defaultNow(),
@@ -109,6 +111,7 @@ export const numberVoids = pgTable('number_voids', {
   protocolStatusCode: integer('protocol_status_code'),
   protocolStatusReason: text('protocol_status_reason'),
   protocolReceivedAt: timestamptz('protocol_received_at'),
+  responseXml: text('response_xml'),
   lastStatusCode: integer('last_status_code'),
   lastStatusReason: text('last_status_reason'),
   createdAt: timestamptz('created_at').notNull().defaultNow(),
@@ -126,4 +129,20 @@ export const sefazAttempts = pgTable('sefaz_attempts', {
   statusCode: integer('status_code'),
   statusReason: text('status_reason'),
   detail: text('detail'),
+});
+
+export const issuerCertificates = pgTable('issuer_certificates', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id').notNull(),
+  issuerId: uuid('issuer_id').notNull(),
+  fingerprintSha256: char('fingerprint_sha256', { length: 95 }).notNull(),
+  subject: text('subject').notNull(),
+  holderCnpj: char('holder_cnpj', { length: 14 }).notNull(),
+  notBefore: timestamptz('not_before').notNull(),
+  notAfter: timestamptz('not_after').notNull(),
+  sealedPfx: text('sealed_pfx').notNull(),
+  sealedPassphrase: text('sealed_passphrase').notNull(),
+  active: boolean('active').notNull().default(true),
+  createdAt: timestamptz('created_at').notNull().defaultNow(),
+  deactivatedAt: timestamptz('deactivated_at'),
 });

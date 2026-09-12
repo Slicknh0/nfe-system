@@ -55,6 +55,7 @@ describe('mapeamento Drizzle', () => {
     schema.invoiceStatusHistory,
     schema.sefazAttempts,
     schema.numberVoids,
+    schema.issuerCertificates,
   ])('corresponde às colunas criadas pelas migrations', async (table) => {
     const { rows } = await database.admin.query<{ column_name: string; is_nullable: string }>(
       `SELECT column_name, is_nullable FROM information_schema.columns

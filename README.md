@@ -7,9 +7,11 @@ contra o XSD oficial. A camada de aplicação emite com numeração concorrente
 sem repetição, grava tudo em Postgres com isolamento por tenant e conduz o
 ciclo de autorização — incluindo timeout, reconciliação por consulta e
 inutilização da numeração das notas pendentes de retorno — contra uma SEFAZ
-**simulada**. Ainda não há comunicação SOAP com a SEFAZ real, API HTTP nem
-interface. O que existe e o que não existe está descrito abaixo, sem arredondar
-para cima.
+simulada ou pelo **provider SOAP real**, com autenticação mútua e certificado A1
+guardado cifrado. O provider real foi exercitado contra uma SEFAZ local com TLS
+mútuo de verdade, mas **ainda não contra a SEFAZ-SP**: isso exige certificado A1
+e credenciamento em homologação. Ainda não há API HTTP nem interface. O que
+existe e o que não existe está descrito abaixo, sem arredondar para cima.
 
 ## Por que a base fiscal foi pesquisada antes de codar
 
@@ -43,6 +45,10 @@ E da documentação oficial, lida na íntegra:
 | Inutilização: `Id` de 43 posições, justificativa de 15 a 255 caracteres, até 10.000 números por pedido | MOC 7.0, Visão Geral, 5.3; `leiauteInutNFe_v4.00.xsd` |
 | Inutilização: 102 homologa; 241 número já utilizado; 256 já inutilizado; 563 pedido repetido, com o protocolo anterior | MOC 7.0, Visão Geral, 5.3.4 e 5.3.5 |
 | Consulta repetida em looping é consumo indevido | MOC 7.0, Visão Geral, tabela 4-9 |
+| Não há API REST oficial para NF-e 55: o canal é SOAP 1.2 sobre TLS 1.2+ com autenticação mútua, mensagem em `nfeDadosMsg`, sem SOAP Header na 4.00 | MOC 7.0, Visão Geral, 4.2.2 e 4.4.1 |
+| Certificado ICP-Brasil com CNPJ no otherName 2.16.76.1.3.3; assinatura exige CNPJ de estabelecimento do emitente, transmissão exige "Autenticação Cliente" | MOC 7.0, Visão Geral, 4.2.3; DOC-ICP-04 |
+| O WSDL dos serviços só é entregue com certificado (HTTP 403 sem ele) | verificado em SP, SVRS e AN |
+| O TLS da SEFAZ-SP termina na AC Raiz Brasileira v10 da ICP-Brasil, ausente do repositório padrão do Node | handshake com a homologação de SP; repositório do ITI |
 
 ### Origem dos schemas
 
@@ -66,11 +72,12 @@ memória que apenas declara o elemento `inutNFe` com esse tipo oficial
 | `@nfe/core` | módulo 11 alfanumérico, CNPJ, CPF, GTIN, chave de acesso, decimal exato, máquina de estados, XML Builder, pedido de inutilização, regressões | 173 |
 | `@nfe/xsd` | validação contra o XSD oficial da NF-e (PL_010f) e da inutilização (PL_010d) | 13 |
 | `@nfe/signer` | assinatura XML-DSig de NF-e e de pedido de inutilização, verificação e pipeline contra verificador independente | 31 |
-| `@nfe/sefaz` | contrato do provider, interpretação de `cStat` (autorização, consulta, inutilização), SEFAZ simulada com fila | 68 |
-| `@nfe/emission` | serviço de emissão, política de reconciliação, inutilização, suíte de contrato sobre store em memória | 68 |
-| `@nfe/persistence` | migrations, RLS, invariantes no banco, store Postgres, fluxo completo em Postgres real | 59 |
+| `@nfe/certificates` | certificado A1 (PKCS#12), CNPJ do otherName ICP-Brasil, regras de uso, cofre AES-256-GCM | 21 |
+| `@nfe/sefaz` | contrato do provider, interpretação de `cStat` (autorização, consulta, inutilização), SEFAZ simulada com fila, provider SOAP com TLS mútuo | 87 |
+| `@nfe/emission` | serviço de emissão, política de reconciliação, inutilização, suíte de contrato sobre store em memória, fluxo com o provider SOAP | 70 |
+| `@nfe/persistence` | migrations, RLS, invariantes no banco, store Postgres, certificados cifrados, fluxo completo em Postgres real | 67 |
 
-Total: **412 testes**. Lint, typecheck strict, build e smoke limpos.
+Total: **462 testes**. Lint, typecheck strict, build e smoke limpos.
 
 ### Fluxo de emissão
 
@@ -115,6 +122,38 @@ Regras verificadas por teste, em memória e em Postgres real:
 - **Repetir a inutilização sem resposta é seguro:** a SEFAZ devolve o protocolo
   do pedido idêntico já homologado (563).
 
+### Comunicação com a SEFAZ real
+
+`SoapSefazProvider` implementa o mesmo contrato do mock: autorização (`enviNFe`
+síncrono com uma NF-e), consulta de protocolo (`consSitNFe`) e inutilização
+(`inutNFe` assinado). `HttpsSoapTransport` faz o TLS mútuo.
+
+- **Verificação do servidor sempre ligada.** A raiz ICP-Brasil v10 está fixada
+  com o fingerprint; foi conferida pelo repositório de raízes do Windows, pela
+  assinatura da AC intermediária que a SEFAZ-SP apresenta e por um handshake
+  real com a homologação de SP. Não existe opção para desligar a verificação.
+- **Classificação de falha sem otimismo.** Falha antes do handshake e do corpo
+  completos é "não enviado"; depois disso, sem resposta completa, é desfecho
+  desconhecido. HTTP 4xx é erro de configuração. SOAP Fault, HTTP 5xx, resposta
+  ininteligível ou de outro ambiente são desfecho desconhecido, e o documento
+  vai para reconciliação.
+- **Produção só com `productionEnabled: true`.**
+- **Mensagens conferidas contra o XSD oficial nos testes:** `enviNFe`,
+  `consSitNFe` e `inutNFe` enviados, e os retornos usados pelos testes.
+- **XML devolvido pela SEFAZ é guardado** (`protNFe` e `retInutNFe`), para
+  compor `nfeProc` e `procInutNFe`.
+
+Certificado A1 (`@nfe/certificates` e `IssuerCertificateRegistry`):
+
+- PFX lido e conferido no cadastro: senha, validade, CNPJ da mesma empresa do
+  emitente, uso para assinatura digital e "Autenticação Cliente";
+- PFX e senha guardados só cifrados (AES-256-GCM), com contexto que amarra o
+  segredo a tenant, emitente e finalidade; chave mestra fora do banco, com
+  rotação por identificador;
+- um certificado ativo por emitente; o cadastro é imutável e não é excluído;
+- `registry.signer()` assina NF-e e inutilização com o certificado ativo;
+  emitente sem certificado para em validação local, sem consumir número.
+
 ### Invariantes garantidas pelo próprio Postgres
 
 Exercitadas com SQL direto, sem passar pela aplicação:
@@ -128,6 +167,7 @@ Exercitadas com SQL direto, sem passar pela aplicação:
 | `NFE05` | XML de documento enfileirado ou transmitido não muda |
 | `NFE06` | tentativa de comunicação concluída não é reescrita |
 | `NFE07` | pedido de inutilização homologado, com seu protocolo, não é alterado nem excluído |
+| `NFE08` | certificado cadastrado não é alterado, excluído nem reativado |
 
 Isolamento entre tenants por **RLS com `FORCE`**: sem `app.tenant_id` na
 transação nenhuma linha é visível, e gravar com tenant diferente é recusado. A
@@ -173,6 +213,19 @@ Registro completo, com fontes, no design doc, seção 10.
 | D19 | Política: 1 min, intervalos de 2 a 60 min, 3 consultas com 217 e 60 min desde o envio | decisão arquitetural, parametrizável |
 | D20 | O ciclo não inutiliza sozinho | ato fiscal exige decisão explícita |
 
+### Fatia de comunicação SOAP e certificado A1
+
+Registro completo, com fontes, no design doc, seção 11.
+
+| # | Decisão | Motivo |
+|---|---|---|
+| D22 | Sem API comercial, sem NFeWizard (GPL-3.0), transporte próprio | terceirizar ou duplicar o núcleo fiscal já validado não compensa |
+| D23 | Raiz ICP-Brasil fixada; verificação do servidor não configurável | segurança não vira opção |
+| D24 | Na dúvida sobre o envio, desfecho desconhecido | um erro nessa direção cai em duplicidade e reconciliação |
+| D26 | Operação e método SOAP da referência sped-nfe | o WSDL não é público; conferir com o A1 |
+| D28 | Cofre AES-256-GCM com contexto por tenant e emitente | senha e PFX nunca em claro |
+| D31 | Um transporte por instância do provider | certificado de transmissão por emitente fica para a API |
+
 ### Decisões de implementação
 
 - **Serializador XML próprio**, pequeno e testado: saída compacta, ordem de
@@ -197,10 +250,15 @@ Registro completo, com fontes, no design doc, seção 10.
 
 ## O que NÃO está implementado
 
-- provider SOAP da SEFAZ (envelope, mTLS com A1, parser de `retEnviNFe` e
-  `retConsSitNFe`) — a interpretação de `cStat` já está pronta para ele;
-- certificado A1: leitura de PFX, armazenamento cifrado, validação de cadeia
-  ICP-Brasil (o signer recebe chave e certificado em PEM);
+- transmissão real para a SEFAZ-SP — exige certificado A1 e credenciamento em
+  homologação; nenhum teste fala com a SEFAZ de verdade;
+- conferência dos nomes de operação e método SOAP contra o `?wsdl` real;
+- escolha do certificado de transmissão por emitente (o provider recebe um
+  transporte por instância);
+- validação da cadeia ICP-Brasil e da LCR do certificado do emitente (a SEFAZ
+  valida; aqui são conferidos validade, CNPJ e finalidades);
+- endereços de contingência SVC-AN e consulta de recibo (`nfeRetAutorizacao`);
+- certificado A3 (token/cartão);
 - agendamento: filas e workers que chamem `runReconciliationCycle` e
   `recoverAbandonedAttempts` periodicamente — hoje são chamados explicitamente;
 - inutilização de faixas sem documento associado (o serviço inutiliza o número
@@ -252,6 +310,9 @@ deliberadamente fora:
   inutilizar): decisão arquitetural e parametrizável, não regra oficial;
 - ano informado no pedido de inutilização: adotado o ano da chave de acesso,
   porque o MOC não especifica;
+- nomes de operação e método SOAP (`NFeAutorizacao4/nfeAutorizacaoLote`,
+  `NFeConsultaProtocolo4/nfeConsultaNF`, `NFeInutilizacao4/nfeInutilizacaoNF`):
+  vêm da implementação de referência e precisam ser conferidos no WSDL;
 - reemissão com o mesmo número após rejeição em emissão normal: prática adotada
   pelos emissores de referência; o Anexo III só trata explicitamente do caso de
   contingência;
@@ -276,7 +337,7 @@ Ou cada etapa isolada:
 ```bash
 npm run lint       # eslint com regras baseadas em tipos
 npm run typecheck  # tsc --noEmit, strict
-npm test           # 412 testes nos seis pacotes
+npm test           # 462 testes nos sete pacotes
 npm run build      # emite dist/ na ordem de dependência
 npm run smoke      # exercita o dist compilado, não o source
 ```
@@ -285,6 +346,10 @@ Os testes de `@nfe/persistence` e o smoke sobem um **Postgres 18 real** com
 `embedded-postgres`, num diretório temporário e numa porta livre, com senhas
 geradas a cada execução e nunca gravadas. Não precisa de Docker nem de Postgres
 instalado, e não toca em serviços Postgres já existentes na máquina.
+
+Os testes do provider SOAP sobem uma SEFAZ local com HTTPS e autenticação mútua,
+com uma PKI de teste gerada em memória (AC, certificado de servidor e
+certificados com CNPJ no otherName). Nenhum certificado real é usado ou gravado.
 
 `npm run smoke` importa `dist/` como um consumidor real importaria e percorre:
 chave com CNPJ alfanumérico → XML → assinatura → XSD oficial → detecção de
@@ -312,7 +377,8 @@ schemas/nfe/              XSDs oficiais versionados
 packages/core/            domínio fiscal puro — sem IO, sem framework
 packages/xsd/             validação contra o XSD oficial
 packages/signer/          assinatura XML-DSig e verificação
-packages/sefaz/           contrato com a SEFAZ, tabelas de cStat, SEFAZ simulada
+packages/certificates/    certificado A1, regras ICP-Brasil, cofre de segredos
+packages/sefaz/           contrato com a SEFAZ, cStat, SEFAZ simulada, provider SOAP
 packages/emission/        casos de uso de emissão e portas
 packages/persistence/     Postgres: migrations, RLS, invariantes, store
   migrations/             SQL versionado — fonte da verdade do esquema

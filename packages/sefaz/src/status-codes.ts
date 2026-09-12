@@ -110,6 +110,26 @@ export interface AuthorizationResponse {
   readonly batch: StatusReply;
   /** `retEnviNFe/protNFe/infProt`, presente no processamento síncrono. */
   readonly protocol?: InvoiceProtocol;
+  /** `cStat` e `xMotivo` de `protNFe` quando o protocolo veio sem `nProt` (rejeição). */
+  readonly protocolStatus?: StatusReply;
+}
+
+/** `protNFe` sem `nProt`: só rejeição e duplicidade fazem sentido sem número de protocolo. */
+function protocolWithoutNumber(batch: StatusReply, status: StatusReply | undefined): AuthorizationResult {
+  if (status === undefined) {
+    return { kind: 'UNRECOGNIZED', ...reply(batch) };
+  }
+  switch (classifyProtocolStatus(status.statusCode)) {
+    case 'DUPLICATE':
+      return { kind: 'DUPLICATE', ...reply(status) };
+    case 'REJECTED':
+      return { kind: 'REJECTED', ...reply(status) };
+    // Autorização ou denegação sem número de protocolo não é aceita.
+    case 'AUTHORIZED':
+    case 'DENIED':
+    case 'UNRECOGNIZED':
+      return { kind: 'UNRECOGNIZED', ...reply(status) };
+  }
 }
 
 export function interpretAuthorizationResponse(response: AuthorizationResponse): AuthorizationResult {
@@ -117,7 +137,7 @@ export function interpretAuthorizationResponse(response: AuthorizationResponse):
 
   if (batch.statusCode === SefazStatus.BATCH_PROCESSED) {
     if (protocol === undefined) {
-      return { kind: 'UNRECOGNIZED', ...reply(batch) };
+      return protocolWithoutNumber(batch, response.protocolStatus);
     }
     switch (classifyProtocolStatus(protocol.statusCode)) {
       case 'AUTHORIZED':
@@ -190,6 +210,8 @@ export interface NumberVoidResponse {
   readonly protocolNumber?: string;
   /** `dhRecbto`: informado inclusive em rejeição. */
   readonly receivedAt?: Date;
+  /** `retInutNFe` como devolvido pela SEFAZ. */
+  readonly xml?: string;
 }
 
 /**
@@ -207,7 +229,15 @@ export function interpretNumberVoidResponse(response: NumberVoidResponse): Numbe
     if (protocolNumber === undefined || receivedAt === undefined) {
       return { kind: 'UNRECOGNIZED', ...reply(status) };
     }
-    return { kind: 'VOIDED', protocol: { ...reply(status), protocolNumber, receivedAt } };
+    return {
+      kind: 'VOIDED',
+      protocol: {
+        ...reply(status),
+        protocolNumber,
+        receivedAt,
+        ...(response.xml === undefined ? {} : { xml: response.xml }),
+      },
+    };
   }
   if (code === SefazStatus.RANGE_ALREADY_VOIDED) {
     return { kind: 'RANGE_ALREADY_VOIDED', ...reply(status) };

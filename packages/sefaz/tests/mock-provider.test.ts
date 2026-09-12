@@ -174,9 +174,9 @@ describe('createSefazProvider', () => {
     );
   });
 
-  it('declara que o provider SOAP ainda não existe, em vez de fingir', () => {
+  it('provider SOAP exige transporte com o certificado de transmissão', () => {
     expect(() => createSefazProvider({ kind: 'soap', environment: Environment.Homologation })).toThrow(
-      /ainda não foi implementado/,
+      /exige transporte/,
     );
   });
 });

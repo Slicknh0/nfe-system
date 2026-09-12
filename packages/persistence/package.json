@@ -22,7 +22,9 @@
     "@nfe/emission": "*",
     "@nfe/sefaz": "*",
     "drizzle-orm": "^0.45.2",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "@nfe/certificates": "*",
+    "@nfe/signer": "*"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
@@ -31,6 +33,8 @@
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
     "@nfe/signer": "*",
-    "@nfe/xsd": "*"
+    "@nfe/xsd": "*",
+    "@types/node-forge": "^1.3.11",
+    "node-forge": "^1.4.0"
   }
 }

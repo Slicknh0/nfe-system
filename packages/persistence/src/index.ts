@@ -29,4 +29,14 @@ export { createIssuer, createTenant, type NewIssuer } from './tenants.js';
 
 export { PostgresEmissionStore } from './postgres-emission-store.js';
 
+export {
+  CertificateAlreadyRegisteredError,
+  IssuerCertificateRegistry,
+  IssuerNotFoundError,
+  NoActiveCertificateError,
+  type CertificateRegistration,
+  type IssuerCertificateRegistryOptions,
+  type StoredCertificate,
+} from './issuer-certificates.js';
+
 export * as schema from './schema.js';

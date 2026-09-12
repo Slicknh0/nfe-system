@@ -36,6 +36,8 @@ export interface InvoiceProtocol {
   readonly receivedAt: Date;
   /** `digVal` — digest da NF-e registrado pela SEFAZ. Opcional no schema. */
   readonly digestValue?: string;
+  /** `protNFe` como devolvido pela SEFAZ (C14N exclusiva), para compor o `nfeProc`. */
+  readonly xml?: string;
 }
 
 export interface StatusReply {
@@ -87,6 +89,8 @@ export interface VoidProtocol {
   readonly protocolNumber: string;
   /** `dhRecbto` */
   readonly receivedAt: Date;
+  /** `retInutNFe` como devolvido pela SEFAZ (C14N exclusiva). */
+  readonly xml?: string;
 }
 
 export type NumberVoidResult =

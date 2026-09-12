@@ -313,6 +313,7 @@ export function describeEmissionStoreContract(
           protocolNumber: '135260000000001',
           receivedAt: new Date('2026-09-11T13:00:05.000Z'),
           digestValue: 'ZGlnZXN0',
+          xml: '<protNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00"><infProt><cStat>100</cStat></infProt></protNFe>',
         };
         const authorized = await authorize(invoice, protocol);
 
@@ -468,6 +469,7 @@ export function describeEmissionStoreContract(
       statusReason: statusCode === 102 ? 'Inutilização de número homologado' : 'Rejeição: repetido',
       protocolNumber: '135260000000077',
       receivedAt: new Date('2026-09-12T15:30:00.000Z'),
+      xml: `<retInutNFe xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00"><infInut><cStat>${statusCode}</cStat></infInut></retInutNFe>`,
     });
 
     describe('consultas de apoio à reconciliação', () => {

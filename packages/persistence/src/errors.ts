@@ -13,6 +13,7 @@ const INVARIANTS: Readonly<Record<string, string>> = Object.freeze({
   NFE05: 'conteúdo de documento em transmissão',
   NFE06: 'tentativa de comunicação concluída',
   NFE07: 'pedido de inutilização homologado',
+  NFE08: 'certificado cadastrado',
 });
 
 export class PersistenceInvariantError extends Error {

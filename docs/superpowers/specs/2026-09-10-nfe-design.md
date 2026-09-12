@@ -234,3 +234,44 @@ type="TInutNFe"/>` sobre o leiaute oficial.
 | D19 | Política de reconciliação parametrizada: 1 min até a primeira consulta, intervalos de 2, 5, 15, 30 e 60 min, 3 consultas com 217 e 60 min desde o envio para liberar a inutilização | valores são decisão arquitetural, não regra oficial; espaçamento crescente evita consumo indevido |
 | D20 | O ciclo de reconciliação consulta e aponta, mas não inutiliza sozinho | inutilização é ato fiscal e exige chamada explícita |
 | D21 | Pedido de inutilização e protocolo guardados em `number_voids`, imutáveis após homologação (SQLSTATE `NFE07`) | são a prova da inutilização |
+
+## 11. Fatia 4 — comunicação SOAP real e certificado A1 cifrado (2026-09-12)
+
+### 11.1 Existe API oficial pronta?
+
+Não para a NF-e modelo 55. O canal oficial é o conjunto de web services SOAP
+de cada autorizadora. As APIs REST encontradas (TecnoSpeed, Brasil NFe,
+Webmania, Spedy e similares) são serviços comerciais que emitem em nome do
+cliente — terceirizariam exatamente o núcleo fiscal que este sistema constrói.
+Em código aberto para Node, o NFeWizard existe, mas é GPL-3.0, traz
+dependências nativas e duplica montagem, assinatura e XSD já validados aqui. A
+sped-nfe (PHP, MIT/LGPL) serviu apenas como referência de nomes de operação.
+
+### 11.2 Base oficial consultada
+
+| Fato | Fonte |
+|---|---|
+| TLS 1.2 ou superior com autenticação mútua; SOAP 1.2; mensagem em `nfeDadosMsg` | MOC 7.0, Visão Geral, 4.2.2 |
+| Na versão 4.00 não há variáveis no SOAP Header | MOC 7.0, Visão Geral, 4.4.1 |
+| Certificado ICP-Brasil A1 ou A3 com CNPJ no otherName 2.16.76.1.3.3 | MOC 7.0, Visão Geral, 4.2.3; DOC-ICP-04 |
+| Assinatura: CNPJ de um estabelecimento do emitente; transmissão: CNPJ do responsável e Extended Key Usage "Autenticação Cliente" | MOC 7.0, Visão Geral, 4.2.3 |
+| URLs dos web services 4.00 de SP (homologação e produção) | página oficial da SEFAZ-SP |
+| WSDL só com autenticação mútua (HTTP 403 sem certificado) | verificado em SP, SVRS e AN em 2026-09-12 |
+| Cadeia TLS da SEFAZ-SP: AC SOLUTI SSL EV G4 → AC Raiz Brasileira v10 | handshake com homologacao.nfe.fazenda.sp.gov.br |
+| Raiz v10 no repositório do ITI; SHA-256 igual ao do repositório de raízes do Windows | acraiz.icpbrasil.gov.br; verificação cruzada |
+| Retornos: `TRetEnviNFe`, `TRetConsSitNFe` (raiz oficial no PL_010d), `TRetInutNFe` | XSDs oficiais |
+
+### 11.3 Decisões
+
+| # | Decisão | Motivo |
+|---|---|---|
+| D22 | Transporte próprio sobre `node:https`, sem biblioteca SOAP | o protocolo é pequeno e fixo; controle total da classificação de falhas |
+| D23 | Verificação do servidor sempre ligada, raiz ICP-Brasil v10 fixada com fingerprint, TLS ≥ 1.2 | bibliotecas de referência desligam a verificação por padrão; aqui não é configurável |
+| D24 | Falha antes de handshake e corpo completos → não enviado; depois → desfecho desconhecido; HTTP 4xx → erro de configuração; 5xx, SOAP Fault, resposta ininteligível ou de outro ambiente → desfecho desconhecido | "na dúvida, saiu"; um erro nessa direção cai em duplicidade e reconciliação |
+| D25 | Produção só com `productionEnabled: true` explícito | homologação é o padrão seguro |
+| D26 | Operação e método SOAP da referência sped-nfe, a conferir contra o `?wsdl` com certificado A1 antes da produção | o WSDL não é público |
+| D27 | PFX lido com `node-forge` e convertido para PEM | A1 ainda usa cifras legadas que o OpenSSL 3 do Node recusa |
+| D28 | Cofre AES-256-GCM, AAD com tenant, emitente e finalidade, chave mestra fora do banco, rotação por identificador de chave | senha e PFX nunca em claro; segredo copiado para outro emitente não abre |
+| D29 | Certificado conferido no cadastro; cadastro imutável (`NFE08`), um ativo por emitente | recusas aparecem no cadastro, e não na primeira emissão |
+| D30 | `protNFe` e `retInutNFe` guardados como devolvidos (C14N exclusiva) | necessários para compor `nfeProc` e `procInutNFe` |
+| D31 | Provider SOAP com um transporte por instância | a escolha do certificado de transmissão por emitente fica para a composição da API |

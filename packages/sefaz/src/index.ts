@@ -50,4 +50,43 @@ export {
   createSefazProvider,
   type SefazProviderConfig,
   type SefazProviderKind,
+  type SoapProviderSettings,
 } from './factory.js';
+
+export {
+  PORTAL_NAMESPACE,
+  SEFAZ_SP_ENDPOINTS,
+  soapAction,
+  soapNamespace,
+  type EndpointCatalog,
+  type SefazService,
+  type ServiceEndpoint,
+} from './soap/endpoints.js';
+
+export {
+  SOAP_12_NAMESPACE,
+  buildSoapRequest,
+  stripXmlDeclaration,
+  type SoapRequest,
+} from './soap/envelope.js';
+
+export {
+  SefazResponseError,
+  SoapFaultError,
+  readAuthorizationResponse,
+  readNumberVoidResponse,
+  readProtocolQueryResponse,
+  readSoapFault,
+} from './soap/response-reader.js';
+
+export {
+  HttpsSoapTransport,
+  type HttpsSoapTransportOptions,
+  type SoapReply,
+  type SoapTransport,
+  type TlsClientCredentials,
+} from './soap/https-transport.js';
+
+export { SoapSefazProvider, type SoapSefazProviderOptions } from './soap/soap-provider.js';
+
+export { DEFAULT_SEFAZ_TRUST, ICP_BRASIL_ROOT_V10, type TrustedRoot } from './soap/icp-brasil-roots.js';
